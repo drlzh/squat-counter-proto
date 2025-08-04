@@ -17,8 +17,6 @@
   <div id="count">0</div>
   <div id="status">Waiting for motion permission...</div>
   <button id="startButton">Start</button>
-  <!-- 🔊 Chime Audio -->
-  <audio id="chime" src="chime.mp3" preload="auto"></audio>
 
   <script>
     const TARGET_HZ = 50;
@@ -82,10 +80,7 @@
           countDisplay.textContent = repCount.toString();
           statusDisplay.textContent = `✅ Rep @ ${t.toFixed(2)}s`;
           lastRepTime = t;
-		  // 🔊 Play chime
-          chime.currentTime = 0;
-          chime.play().catch(console.warn); // handle async error silently
-        }
+       }
       }
     }
 
