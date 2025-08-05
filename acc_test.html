@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Adaptive Squat Counter J3</title>
+  <title>Adaptive Squat Counter A</title>
   <style>
     body { font-family: sans-serif; text-align: center; padding: 2rem; }
     h1 { font-size: 2.5rem; margin-bottom: 1rem; }
@@ -17,7 +17,7 @@
   </style>
 </head>
 <body>
-  <h1>Adaptive Squat Counter J3</h1>
+  <h1>Adaptive Squat Counter A1</h1>
   <div id="count">0</div>
   <div id="status">Waiting for motion permission...</div>
   <div id="repLog"></div>
@@ -97,7 +97,7 @@
       });
     };
 
-  function handleMotion(event) {
+function handleMotion(event) {
   const acc = event.accelerationIncludingGravity;
   const now = Date.now() / 1000;
   if (!acc?.x || !acc?.y || !acc?.z) return;
@@ -106,20 +106,16 @@
   if (buffer.length > 2 * TARGET_HZ) buffer.shift();
   if (buffer.length < SAMPLE_SIZE) return;
 
-  const x = buffer.map(p => p.x);
   const y = buffer.map(p => p.y);
   const z = buffer.map(p => p.z);
-
-  const xFiltered = savitzkyGolay(x);
   const yFiltered = savitzkyGolay(y);
   const zFiltered = savitzkyGolay(z);
+  const signal = yFiltered.map((yVal, i) => (yVal + zFiltered[i]) / 2);
 
-  const fused = xFiltered.map((_, i) =>
-    Math.sqrt(xFiltered[i] ** 2 + yFiltered[i] ** 2 + zFiltered[i] ** 2)
-  );
+  const r = pearson(yFiltered, zFiltered);
+  if (r < CORRELATION_THRESHOLD || signal.length < VALLEY_WINDOW) return;
 
-  // --- Peak/trough-based descent detection ---
-  const s = fused.slice(-VALLEY_WINDOW);
+  const s = signal.slice(-VALLEY_WINDOW);
   const t = buffer[buffer.length - 1].t;
   const isValley = VALLEY_POSITIONS.every(i => s[i] < Math.min(...s.filter((_, idx) => idx !== i)));
   const amp = Math.abs(s[VALLEY_POSITIONS[0]]);
@@ -137,33 +133,39 @@
     if (intervalBuffer.length > 10) intervalBuffer.shift();
     lastRepTime = t;
 
-    // Extract segment (1 sec window)
+    // --- Descent Speed Calculation (3-axis) ---
     const windowSize = Math.floor(TARGET_HZ);
-    const seg = buffer.slice(-windowSize);
-    const accVec = seg.map(p => Math.sqrt(p.x ** 2 + p.y ** 2 + p.z ** 2));
-    const times = seg.map(p => p.t);
+    const seg = buffer.slice(Math.max(0, buffer.length - windowSize));
 
-    // Double integration via Trapezoidal Rule to estimate displacement
-    const velocity = [0];
-    for (let i = 1; i < accVec.length; i++) {
-      const dt = times[i] - times[i - 1];
-      const vi = velocity[i - 1] + 0.5 * (accVec[i] + accVec[i - 1]) * dt;
-      velocity.push(vi);
+    // Acceleration vector magnitude
+    const mag = seg.map(p => Math.sqrt(p.x ** 2 + p.y ** 2 + p.z ** 2));
+    const time = seg.map(p => p.t);
+
+    // First integral: velocity (via trapezoidal rule)
+    const vel = [0];
+    for (let i = 1; i < mag.length; i++) {
+      const dt = time[i] - time[i - 1];
+      const v = vel[i - 1] + 0.5 * (mag[i] + mag[i - 1]) * dt;
+      vel.push(v);
     }
 
-    const displacement = velocity.reduce((s, v, i) =>
-      i > 0 ? s + 0.5 * (velocity[i] + velocity[i - 1]) * (times[i] - times[i - 1]) : s, 0
-    );
+    // Second integral: displacement (again via trapezoidal rule)
+    const disp = [0];
+    for (let i = 1; i < vel.length; i++) {
+      const dt = time[i] - time[i - 1];
+      const d = disp[i - 1] + 0.5 * (vel[i] + vel[i - 1]) * dt;
+      disp.push(d);
+    }
 
-    const descentTime = times[times.length - 1] - times[0];
-    const descentSpeed = displacement / descentTime;
+    const displacement = disp[disp.length - 1] - disp[0];
+    const descentDuration = time[time.length - 1] - time[0];
+    const descentSpeed = displacement / descentDuration;
 
-    // Quality buckets (tuneable)
     let quality = "✅ Good";
-    if (descentSpeed < 0.5) quality = "⚠️ Slow";
-    if (descentSpeed < 0.2) quality = "❌ Too Gentle";
+    if (descentSpeed < 0.3) quality = "⚠️ Slow";
+    if (descentSpeed < 0.15) quality = "❌ Ineffective";
 
-    const speedMsg = `#${repCount} @ ${t.toFixed(2)}s — Speed: ${descentSpeed.toFixed(3)} m/s`;
+    const speedMsg = `#${repCount} @ ${t.toFixed(2)}s — Descent Speed: ${descentSpeed.toFixed(3)} (${quality})`;
     statusDisplay.textContent = speedMsg;
 
     const logItem = document.createElement("div");
@@ -174,6 +176,7 @@
     chimeSound.play().catch(() => {});
   }
 }
+
 
 
 
