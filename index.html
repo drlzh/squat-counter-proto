@@ -145,7 +145,7 @@
         if (jitterScore > 0.6) quality = "❌ Very Wobbly";
 
         // Update status and log
-        const jitterMsg = `#${repCount} @ ${t.toFixed(2)}s — Jitter: ${jitterScore.toFixed(3)} (${quality})`;
+        const jitterMsg = `#${repCount} @ ${t.toFixed(2)}s — Jitter: ${jitterScore.toFixed(3)}`;
         statusDisplay.textContent = jitterMsg;
         const logItem = document.createElement("div");
         logItem.textContent = jitterMsg;
