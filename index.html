@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Squat Counter</title>
   <style>
     body { font-family: sans-serif; text-align: center; padding: 2rem; }
@@ -18,13 +18,11 @@
   <div id="status">Waiting for motion permission...</div>
   <button id="startButton">Start</button>
 
-  <!-- 🔊 Chime audio (must be small and in same folder) -->
-  <audio id="chime" src="chime.mp3" preload="auto"></audio>
-
   <script>
     const TARGET_HZ = 50;
+    const SAMPLE_SIZE = 31;
     const CORRELATION_THRESHOLD = 0.85;
-    const MIN_PEAK_GAP = 1.0;
+    const MIN_PEAK_GAP = 1.0; // seconds
     const WINDOW_SIZE = 5;
 
     const buffer = [];
@@ -34,25 +32,15 @@
     const countDisplay = document.getElementById("count");
     const statusDisplay = document.getElementById("status");
     const startButton = document.getElementById("startButton");
-    const chime = document.getElementById("chime");
 
     startButton.onclick = async () => {
       startButton.disabled = true;
-      statusDisplay.textContent = "Requesting motion access...";
+      statusDisplay.textContent = "Requesting permission...";
 
       try {
-        if (typeof DeviceMotionEvent?.requestPermission === "function") {
+        if (typeof DeviceMotionEvent.requestPermission === "function") {
           const response = await DeviceMotionEvent.requestPermission();
           if (response !== "granted") throw new Error("Permission denied");
-        }
-
-        // ✅ Prime audio so Safari won't block it later
-        try {
-          await chime.play();
-          chime.pause();
-          chime.currentTime = 0;
-        } catch (_) {
-          console.warn("Audio priming skipped or blocked");
         }
 
         window.addEventListener("devicemotion", handleMotion);
@@ -70,8 +58,10 @@
       if (!acc?.y || !acc?.z) return;
 
       buffer.push({ y: -acc.y, z: acc.z, t: now });
-      if (buffer.length > 2 * TARGET_HZ) buffer.shift();
-      if (buffer.length < 2 * TARGET_HZ) return;
+      const maxBuffer = 2 * TARGET_HZ;
+      if (buffer.length > maxBuffer) buffer.shift();
+
+      if (buffer.length < maxBuffer) return;
 
       const y = buffer.map(p => p.y);
       const z = buffer.map(p => p.z);
@@ -87,27 +77,11 @@
 
         if (s[2] < Math.min(s[0], s[1], s[3], s[4]) && t - lastRepTime >= MIN_PEAK_GAP) {
           repCount++;
-          lastRepTime = t;
           countDisplay.textContent = repCount.toString();
           statusDisplay.textContent = `✅ Rep @ ${t.toFixed(2)}s`;
-
-          // ✅ Safe deferred chime playback
-          playChimeSafe();
-        }
+          lastRepTime = t;
+       }
       }
-    }
-
-    function playChimeSafe() {
-      requestAnimationFrame(() => {
-        try {
-          chime.currentTime = 0;
-          chime.play().catch(err => {
-            console.warn("Audio play blocked:", err);
-          });
-        } catch (err) {
-          console.warn("Audio error:", err);
-        }
-      });
     }
 
     function pearson(x, y) {
@@ -126,22 +100,81 @@
       return denom === 0 ? 0 : num / denom;
     }
 
-    function savitzkyGolay(data) {
-      if (data.length < WINDOW_SIZE) return data;
-      const C = [-3, 12, 17, 12, -3]; // windowSize = 5, poly = 2, deriv = 0
-      const norm = 35;
-      const result = [];
+    function factorial(n) {
+      let r = 1;
+      while (n > 0) r *= n--;
+      return r;
+    }
 
-      for (let i = 0; i <= data.length - WINDOW_SIZE; i++) {
-        let acc = 0;
-        for (let j = 0; j < WINDOW_SIZE; j++) {
-          acc += (C[j] * data[i + j]) / norm;
+    function padArray(arr, size, padValue = 'replicate') {
+      const pre = [];
+      const post = [];
+      for (let i = 0; i < size; i++) {
+        if (padValue === 'replicate') {
+          pre.push(arr[0]);
+          post.push(arr[arr.length - 1]);
+        } else {
+          pre.push(0);
+          post.push(0);
         }
-        result.push(acc);
+      }
+      return [...pre, ...arr, ...post];
+    }
+
+    function savitzkyGolay(data, h = 1, options = {}) {
+      const {
+        windowSize = 5,
+        derivative = 0,
+        polynomial = 2,
+        pad = 'none',
+        padValue = 'replicate'
+      } = options;
+
+      if (windowSize % 2 === 0 || windowSize < 5) {
+        throw new RangeError('Window size must be odd and >= 5');
       }
 
-      while (result.length < data.length) result.push(result[result.length - 1]);
-      return result;
+      const step = Math.floor(windowSize / 2);
+      if (pad === 'pre') {
+        data = padArray(data, step, padValue);
+      }
+
+      let C, norm;
+      if (
+        windowSize === 5 &&
+        polynomial === 2 &&
+        (derivative === 0 || derivative === 1 || derivative === 2)
+      ) {
+        // Precomputed common case
+        if (derivative === 0) {
+          C = [-3, 12, 17, 12, -3];
+          norm = 35;
+        } else if (derivative === 1) {
+          C = [-2, -1, 0, 1, 2];
+          norm = 10;
+        } else if (derivative === 2) {
+          C = [2, -1, -2, -1, 2];
+          norm = 7;
+        }
+      } else {
+        throw new Error('Only common case is supported in this standalone demo');
+      }
+
+      const det = norm * Math.pow(h, derivative);
+      const output = [];
+      for (let k = 0; k <= data.length - windowSize; k++) {
+        let acc = 0;
+        for (let l = 0; l < windowSize; l++) {
+          acc += (C[l] * data[k + l]) / det;
+        }
+        output.push(acc);
+      }
+
+      if (pad === 'post') {
+        return padArray(output, step, padValue);
+      }
+
+      return output;
     }
   </script>
 </body>
