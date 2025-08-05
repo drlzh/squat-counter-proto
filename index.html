@@ -98,62 +98,72 @@
     };
 
     function handleMotion(event) {
-      const acc = event.accelerationIncludingGravity;
-      const now = Date.now() / 1000;
-      if (!acc?.y || !acc?.z) return;
+  const acc = event.accelerationIncludingGravity;
+  const now = Date.now() / 1000;
+  if (!acc?.y || !acc?.z) return;
 
-      buffer.push({ y: -acc.y, z: acc.z, t: now });
-      if (buffer.length > 2 * TARGET_HZ) buffer.shift();
-      if (buffer.length < SAMPLE_SIZE) return;
+  buffer.push({ y: -acc.y, z: acc.z, t: now });
+  if (buffer.length > 2 * TARGET_HZ) buffer.shift();
+  if (buffer.length < SAMPLE_SIZE) return;
 
-      const y = buffer.map(p => p.y);
-      const z = buffer.map(p => p.z);
-      const yFiltered = savitzkyGolay(y);
-      const zFiltered = savitzkyGolay(z);
-      const signal = yFiltered.map((yVal, i) => (yVal + zFiltered[i]) / 2);
+  const y = buffer.map(p => p.y);
+  const z = buffer.map(p => p.z);
+  const yFiltered = savitzkyGolay(y);
+  const zFiltered = savitzkyGolay(z);
+  const signal = yFiltered.map((yVal, i) => (yVal + zFiltered[i]) / 2);
 
-      const r = pearson(yFiltered, zFiltered);
-      if (r < CORRELATION_THRESHOLD || signal.length < VALLEY_WINDOW) return;
+  const r = pearson(yFiltered, zFiltered);
+  if (r < CORRELATION_THRESHOLD || signal.length < VALLEY_WINDOW) return;
 
-      const s = signal.slice(-VALLEY_WINDOW);
-      const t = buffer[buffer.length - 1].t;
-      const isValley = VALLEY_POSITIONS.every(i => s[i] < Math.min(...s.filter((_, idx) => idx !== i)));
-      const amp = Math.abs(s[VALLEY_POSITIONS[0]]);
-      const timeSinceLast = t - lastRepTime;
-      const avgInterval = intervalBuffer.length >= 2
-        ? intervalBuffer.reduce((a, b) => a + b, 0) / intervalBuffer.length
-        : MIN_CD;
+  const s = signal.slice(-VALLEY_WINDOW);
+  const t = buffer[buffer.length - 1].t;
+  const isValley = VALLEY_POSITIONS.every(i => s[i] < Math.min(...s.filter((_, idx) => idx !== i)));
+  const amp = Math.abs(s[VALLEY_POSITIONS[0]]);
+  const timeSinceLast = t - lastRepTime;
+  const avgInterval = intervalBuffer.length >= 2
+    ? intervalBuffer.reduce((a, b) => a + b, 0) / intervalBuffer.length
+    : MIN_CD;
 
-      const cooldown = Math.max(MIN_CD, Math.min(MAX_CD, ADAPTIVE_K * avgInterval));
+  const cooldown = Math.max(MIN_CD, Math.min(MAX_CD, ADAPTIVE_K * avgInterval));
 
-      if (isValley && amp > AMPLITUDE_THRESHOLD && timeSinceLast >= cooldown) {
-        repCount++;
-        countDisplay.textContent = repCount.toString();
-        intervalBuffer.push(timeSinceLast);
-        if (intervalBuffer.length > 10) intervalBuffer.shift();
-        lastRepTime = t;
+  if (isValley && amp > AMPLITUDE_THRESHOLD && timeSinceLast >= cooldown) {
+    repCount++;
+    countDisplay.textContent = repCount.toString();
+    intervalBuffer.push(timeSinceLast);
+    if (intervalBuffer.length > 10) intervalBuffer.shift();
+    lastRepTime = t;
 
-        // Jitter analysis (on raw signal)
-        const windowSize = Math.floor(TARGET_HZ);
-        const startIdx = Math.max(0, buffer.length - windowSize);
-        const seg = buffer.slice(startIdx);
-        const rawFused = seg.map(p => (p.y + p.z) / 2);
-        const tv = rawFused.reduce((sum, val, i, arr) => i > 0 ? sum + Math.abs(val - arr[i - 1]) : sum, 0);
-        const jitterScore = tv / (1 + tv);
-        let quality = "✅ Good";
-        if (jitterScore > 0.35) quality = "⚠️ Wobbly";
-        if (jitterScore > 0.6) quality = "❌ Very Wobbly";
+    const windowSize = Math.floor(TARGET_HZ);
+    const startIdx = Math.max(0, buffer.length - windowSize);
+    const seg = buffer.slice(startIdx);
 
-        const jitterMsg = `#${repCount} @ ${t.toFixed(2)}s — Jitter: ${jitterScore.toFixed(3)} (${quality})`;
-        statusDisplay.textContent = jitterMsg;
-        const logItem = document.createElement("div");
-        logItem.textContent = jitterMsg;
-        repLog.appendChild(logItem);
+    const rawY = seg.map(p => p.y);
+    const rawZ = seg.map(p => p.z);
+    const rawFused = rawY.map((val, i) => (val + rawZ[i]) / 2);
 
-        chimeSound.currentTime = 0;
-        chimeSound.play().catch(() => {});
-      }
-    }
+    const tv = arr => arr.reduce((s, v, i, a) => i > 0 ? s + Math.abs(v - a[i - 1]) : s, 0);
+    const normTV = arr => tv(arr) / (1 + tv(arr));
+
+    const yJitter = normTV(rawY);
+    const zJitter = normTV(rawZ);
+    const fusedJitter = normTV(rawFused);
+    const avgJitter = (yJitter + zJitter + fusedJitter) / 3;
+
+    let quality = "✅ Good";
+    if (avgJitter > 0.35) quality = "⚠️ Unstable";
+    if (avgJitter > 0.6) quality = "❌ Erratic";
+
+    const jitterMsg = `#${repCount} @ ${t.toFixed(2)}s — Y: ${yJitter.toFixed(3)}, Z: ${zJitter.toFixed(3)}, Fused: ${fusedJitter.toFixed(3)} (${quality})`;
+    statusDisplay.textContent = jitterMsg;
+
+    const logItem = document.createElement("div");
+    logItem.textContent = jitterMsg;
+    repLog.appendChild(logItem);
+
+    chimeSound.currentTime = 0;
+    chimeSound.play().catch(() => {});
+  }
+}
 
     function pearson(x, y) {
       const n = x.length;
