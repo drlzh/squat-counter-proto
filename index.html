@@ -97,7 +97,7 @@
       });
     };
 
-    function handleMotion(event) {
+  function handleMotion(event) {
   const acc = event.accelerationIncludingGravity;
   const now = Date.now() / 1000;
   if (!acc?.y || !acc?.z) return;
@@ -136,34 +136,42 @@
     const windowSize = Math.floor(TARGET_HZ);
     const startIdx = Math.max(0, buffer.length - windowSize);
     const seg = buffer.slice(startIdx);
+    const rawFused = seg.map(p => (p.y + p.z) / 2);
 
-    const rawY = seg.map(p => p.y);
-    const rawZ = seg.map(p => p.z);
-    const rawFused = rawY.map((val, i) => (val + rawZ[i]) / 2);
+    // --- Sharpness Calculation using Depth-to-Width ---
+    function computeSharpness(sig, thresholdRatio = 0.5) {
+      const min = Math.min(...sig);
+      const max = Math.max(...sig);
+      const depth = max - min;
 
-    const tv = arr => arr.reduce((s, v, i, a) => i > 0 ? s + Math.abs(v - a[i - 1]) : s, 0);
-    const normTV = arr => tv(arr) / (1 + tv(arr));
+      const valleyIndex = sig.indexOf(min);
+      let left = valleyIndex, right = valleyIndex;
 
-    const yJitter = normTV(rawY);
-    const zJitter = normTV(rawZ);
-    const fusedJitter = normTV(rawFused);
-    const avgJitter = (yJitter + zJitter + fusedJitter) / 3;
+      while (left > 0 && sig[left] < min + thresholdRatio * depth) left--;
+      while (right < sig.length - 1 && sig[right] < min + thresholdRatio * depth) right++;
 
+      const width = right - left + 1;
+      return depth / width;
+    }
+
+    const sharpness = computeSharpness(rawFused);
     let quality = "✅ Good";
-    if (avgJitter > 0.35) quality = "⚠️ Unstable";
-    if (avgJitter > 0.6) quality = "❌ Erratic";
+    if (sharpness < 0.3) quality = "⚠️ Flat or Slow";
+    if (sharpness < 0.15) quality = "❌ No Clear Dip";
 
-    const jitterMsg = `#${repCount} @ ${t.toFixed(2)}s — Y: ${yJitter.toFixed(3)}, Z: ${zJitter.toFixed(3)}, Fused: ${fusedJitter.toFixed(3)} (${quality})`;
-    statusDisplay.textContent = jitterMsg;
+    // --- Logging ---
+    const sharpMsg = `#${repCount} @ ${t.toFixed(2)}s — Sharpness: ${sharpness.toFixed(3)} (${quality})`;
+    statusDisplay.textContent = sharpMsg;
 
     const logItem = document.createElement("div");
-    logItem.textContent = jitterMsg;
+    logItem.textContent = sharpMsg;
     repLog.appendChild(logItem);
 
     chimeSound.currentTime = 0;
     chimeSound.play().catch(() => {});
   }
 }
+
 
     function pearson(x, y) {
       const n = x.length;
