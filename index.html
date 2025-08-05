@@ -1,0 +1,240 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Adaptive Squat Counter</title>
+  <style>
+    body { font-family: sans-serif; text-align: center; padding: 2rem; }
+    h1 { font-size: 2.5rem; margin-bottom: 1rem; }
+    #count { font-size: 4rem; color: seagreen; }
+    #status { margin-top: 1rem; font-size: 1.1rem; }
+    label { display: block; margin-top: 1rem; font-size: 1rem; }
+    input { padding: 0.3rem; font-size: 1rem; width: 80px; }
+    button { font-size: 1.2rem; padding: 0.6rem 1.2rem; margin-top: 1rem; }
+    .config { margin: 1rem auto; max-width: 400px; text-align: left; }
+  </style>
+</head>
+<body>
+  <h1>Adaptive Squat Counter</h1>
+  <div id="count">0</div>
+  <div id="status">Waiting for motion permission...</div>
+  <button id="startButton">Start</button>
+  <button id="testSoundButton">Test Sound</button>
+  <audio id="chimeSound" src="chime.mp3" preload="auto"></audio>
+
+  <script>
+    const TARGET_HZ = 50;
+    const SAMPLE_SIZE = 31;
+    const WINDOW_DURATION = 2.0;
+    const WINDOW_SIZE = Math.floor(WINDOW_DURATION * TARGET_HZ);
+    const VALLEY_WINDOW = 5;
+    const VALLEY_POSITIONS = [2];
+    const ADAPTIVE_K = 0.75;
+    const MIN_CD = 1.0;
+    const MAX_CD = 2.5;
+    const GYRO_SCALE = 0.8;
+
+    let buffer = [];
+    let repCount = 0;
+    let lastPeakTime = -Infinity;
+    let recentAmplitudes = [];
+    let recentCorrelations = [];
+
+    const maxHistory = 10;
+
+    const countDisplay = document.getElementById("count");
+    const statusDisplay = document.getElementById("status");
+    const startButton = document.getElementById("startButton");
+    const testSoundButton = document.getElementById("testSoundButton");
+    const chimeSound = document.getElementById("chimeSound");
+
+    startButton.onclick = async () => {
+      startButton.disabled = true;
+      buffer = [];
+      repCount = 0;
+      lastPeakTime = -Infinity;
+      recentAmplitudes = [];
+      recentCorrelations = [];
+      statusDisplay.textContent = "Requesting motion access...";
+
+      try {
+        if (typeof DeviceMotionEvent.requestPermission === "function") {
+          const response = await DeviceMotionEvent.requestPermission();
+          if (response !== "granted") throw new Error("Permission denied");
+        }
+
+        window.addEventListener("devicemotion", handleMotion);
+        statusDisplay.textContent = "Tracking... Start squatting!";
+      } catch (err) {
+        statusDisplay.textContent = "❌ Motion access denied.";
+        console.error(err);
+      }
+    };
+
+    testSoundButton.onclick = () => {
+      chimeSound.currentTime = 0;
+      chimeSound.play().catch(err => {
+        console.warn("🔇 Audio playback failed:", err);
+        alert("Audio could not play. Try interacting with the page first.");
+      });
+    };
+
+    function handleMotion(event) {
+      const acc = event.accelerationIncludingGravity;
+      const rot = event.rotationRate;
+      const t = Date.now() / 1000;
+
+      if (!acc?.y || !acc?.z || !rot?.alpha) return;
+
+      const ay = acc.y;
+      const az = acc.z;
+      const gz = rot.alpha;
+      const fused = ((-ay + az) / 2) + GYRO_SCALE * gz;
+
+      buffer.push({ t, fused, ay: -ay, az, gz });
+
+      if (buffer.length > WINDOW_SIZE) buffer.shift();
+      if (buffer.length < WINDOW_SIZE) return;
+
+      const yRaw = buffer.map(p => p.ay);
+      const zRaw = buffer.map(p => p.az);
+      const fusedVals = buffer.map(p => p.fused);
+
+      const yFiltered = savitzkyGolay(yRaw);
+      const zFiltered = savitzkyGolay(zRaw);
+      const fusedFiltered = savitzkyGolay(fusedVals);
+
+      const r = pearson(yFiltered, zFiltered);
+      recentCorrelations.push(r);
+      if (recentCorrelations.length > maxHistory) recentCorrelations.shift();
+
+      const s = fusedFiltered.slice(-VALLEY_WINDOW);
+      const sMin = Math.min(...s);
+      const sIdx = s.indexOf(sMin);
+      const sMax = Math.max(...s);
+      const amplitude = sMax - sMin;
+      recentAmplitudes.push(amplitude);
+      if (recentAmplitudes.length > maxHistory) recentAmplitudes.shift();
+
+      const ampThresh = Math.max(1.5, mean(recentAmplitudes) - 0.5 * std(recentAmplitudes));
+      const corrThresh = Math.max(0.7, mean(recentCorrelations) - 0.3 * std(recentCorrelations));
+
+      if (
+        VALLEY_POSITIONS.includes(sIdx) &&
+        (r > corrThresh || amplitude > ampThresh)
+      ) {
+        const now = buffer[buffer.length - 1].t;
+        const intervals = repTimes.slice(-3).map((t, i, arr) => i > 0 ? t - arr[i - 1] : null).filter(Boolean);
+        const avgInterval = intervals.length ? mean(intervals) : MIN_CD;
+        const cooldown = Math.min(Math.max(ADAPTIVE_K * avgInterval, MIN_CD), MAX_CD);
+
+        if (now - lastPeakTime >= cooldown) {
+          lastPeakTime = now;
+          repCount++;
+          countDisplay.textContent = repCount;
+          chimeSound.currentTime = 0;
+          chimeSound.play();
+        }
+      }
+    }
+
+    const repTimes = [];
+
+    function pearson(x, y) {
+      const n = x.length;
+      const meanX = mean(x);
+      const meanY = mean(y);
+      let num = 0, dx2 = 0, dy2 = 0;
+      for (let i = 0; i < n; i++) {
+        const dx = x[i] - meanX;
+        const dy = y[i] - meanY;
+        num += dx * dy;
+        dx2 += dx * dx;
+        dy2 += dy * dy;
+      }
+      const denom = Math.sqrt(dx2 * dy2);
+      return denom === 0 ? 0 : num / denom;
+    }
+
+    function mean(arr) {
+      return arr.reduce((a, b) => a + b, 0) / arr.length;
+    }
+
+    function std(arr) {
+      const m = mean(arr);
+      return Math.sqrt(arr.reduce((sum, val) => sum + (val - m) ** 2, 0) / arr.length);
+    }
+
+    function padArray(arr, size, padValue = 'replicate') {
+      const pre = [], post = [];
+      for (let i = 0; i < size; i++) {
+        if (padValue === 'replicate') {
+          pre.push(arr[0]);
+          post.push(arr[arr.length - 1]);
+        } else {
+          pre.push(0);
+          post.push(0);
+        }
+      }
+      return [...pre, ...arr, ...post];
+    }
+
+    function savitzkyGolay(data, h = 1, options = {}) {
+      const {
+        windowSize = 5,
+        derivative = 0,
+        polynomial = 2,
+        pad = 'none',
+        padValue = 'replicate'
+      } = options;
+
+      if (windowSize % 2 === 0 || windowSize < 5) {
+        throw new RangeError('Window size must be odd and >= 5');
+      }
+
+      const step = Math.floor(windowSize / 2);
+      if (pad === 'pre') {
+        data = padArray(data, step, padValue);
+      }
+
+      let C, norm;
+      if (
+        windowSize === 5 &&
+        polynomial === 2 &&
+        (derivative === 0 || derivative === 1 || derivative === 2)
+      ) {
+        if (derivative === 0) {
+          C = [-3, 12, 17, 12, -3];
+          norm = 35;
+        } else if (derivative === 1) {
+          C = [-2, -1, 0, 1, 2];
+          norm = 10;
+        } else if (derivative === 2) {
+          C = [2, -1, -2, -1, 2];
+          norm = 7;
+        }
+      } else {
+        throw new Error('Only common case is supported in this demo');
+      }
+
+      const det = norm * Math.pow(h, derivative);
+      const output = [];
+      for (let k = 0; k <= data.length - windowSize; k++) {
+        let acc = 0;
+        for (let l = 0; l < windowSize; l++) {
+          acc += (C[l] * data[k + l]) / det;
+        }
+        output.push(acc);
+      }
+
+      if (pad === 'post') {
+        return padArray(output, step, padValue);
+      }
+
+      return output;
+    }
+  </script>
+</body>
+</html>
