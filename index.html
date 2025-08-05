@@ -1,10 +1,9 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Adaptive Squat Counter</title>
+  <title>Adaptive Squat Counter w/ Gyro</title>
   <style>
     body { font-family: sans-serif; text-align: center; padding: 2rem; }
     h1 { font-size: 2.5rem; margin-bottom: 1rem; }
@@ -20,43 +19,48 @@
   <h1>Adaptive Squat Counter</h1>
   <div id="count">0</div>
   <div id="status">Waiting for motion permission...</div>
+  <div id="gyroReadout">Gyro Z: 0</div>
+
+  <div class="config">
+    <label>SAMPLE_SIZE: <input type="number" id="inputSampleSize" value="31" /></label>
+    <label>VALLEY_WINDOW: <input type="number" id="inputValleyWindow" value="5" /></label>
+    <label>VALLEY_POSITIONS: <input type="text" id="inputValleyPos" value="2" /></label>
+    <label>CORRELATION_THRESHOLD: <input type="number" id="inputCorr" value="0.85" step="0.01" /></label>
+    <label>AMPLITUDE_THRESHOLD: <input type="number" id="inputAmp" value="2.5" step="0.1" /></label>
+    <label>ADAPTIVE_K: <input type="number" id="inputAdaptiveK" value="0.75" step="0.01" /></label>
+    <label>MIN_CD: <input type="number" id="inputMinCD" value="1.0" step="0.1" /></label>
+    <label>MAX_CD: <input type="number" id="inputMaxCD" value="2.5" step="0.1" /></label>
+    <label>GYRO_SCALE: <input type="number" id="inputGyroScale" value="0.8" step="0.1" /></label>
+  </div>
+
   <button id="startButton">Start</button>
   <button id="testSoundButton">Test Sound</button>
   <audio id="chimeSound" src="chime.mp3" preload="auto"></audio>
 
   <script>
     const TARGET_HZ = 50;
-    const SAMPLE_SIZE = 31;
     const WINDOW_DURATION = 2.0;
-    const WINDOW_SIZE = Math.floor(WINDOW_DURATION * TARGET_HZ);
-    const VALLEY_WINDOW = 5;
-    const VALLEY_POSITIONS = [2];
-    const ADAPTIVE_K = 0.75;
-    const MIN_CD = 1.0;
-    const MAX_CD = 2.5;
-    const GYRO_SCALE = 0.8;
+    const repTimes = [];
 
-    let buffer = [];
-    let repCount = 0;
-    let lastPeakTime = -Infinity;
-    let recentAmplitudes = [];
-    let recentCorrelations = [];
-
+    let buffer = [], repCount = 0, lastPeakTime = -Infinity;
+    let recentAmplitudes = [], recentCorrelations = [];
     const maxHistory = 10;
 
     const countDisplay = document.getElementById("count");
     const statusDisplay = document.getElementById("status");
+    const gyroReadout = document.getElementById("gyroReadout");
     const startButton = document.getElementById("startButton");
     const testSoundButton = document.getElementById("testSoundButton");
     const chimeSound = document.getElementById("chimeSound");
 
     startButton.onclick = async () => {
-      startButton.disabled = true;
-      buffer = [];
       repCount = 0;
       lastPeakTime = -Infinity;
+      buffer = [];
       recentAmplitudes = [];
       recentCorrelations = [];
+
+      startButton.disabled = true;
       statusDisplay.textContent = "Requesting motion access...";
 
       try {
@@ -76,8 +80,7 @@
     testSoundButton.onclick = () => {
       chimeSound.currentTime = 0;
       chimeSound.play().catch(err => {
-        console.warn("🔇 Audio playback failed:", err);
-        alert("Audio could not play. Try interacting with the page first.");
+        alert("Audio failed to play. Tap the page to enable audio.");
       });
     };
 
@@ -91,46 +94,52 @@
       const ay = acc.y;
       const az = acc.z;
       const gz = rot.alpha;
-      const fused = ((-ay + az) / 2) + GYRO_SCALE * gz;
+      const gyroScale = parseFloat(document.getElementById("inputGyroScale").value);
+      const fused = ((-ay + az) / 2) + gyroScale * gz;
 
       buffer.push({ t, fused, ay: -ay, az, gz });
-
-      if (buffer.length > WINDOW_SIZE) buffer.shift();
-      if (buffer.length < WINDOW_SIZE) return;
+      if (buffer.length > TARGET_HZ * 2) buffer.shift();
+      if (buffer.length < TARGET_HZ * 2) return;
 
       const yRaw = buffer.map(p => p.ay);
       const zRaw = buffer.map(p => p.az);
       const fusedVals = buffer.map(p => p.fused);
 
-      const yFiltered = savitzkyGolay(yRaw);
-      const zFiltered = savitzkyGolay(zRaw);
-      const fusedFiltered = savitzkyGolay(fusedVals);
+      const sampleSize = parseInt(document.getElementById("inputSampleSize").value);
+      const yFiltered = savitzkyGolay(yRaw, 1, { windowSize: 5 });
+      const zFiltered = savitzkyGolay(zRaw, 1, { windowSize: 5 });
+      const fusedFiltered = savitzkyGolay(fusedVals, 1, { windowSize: 5 });
 
       const r = pearson(yFiltered, zFiltered);
       recentCorrelations.push(r);
       if (recentCorrelations.length > maxHistory) recentCorrelations.shift();
 
-      const s = fusedFiltered.slice(-VALLEY_WINDOW);
+      const valleyWindow = parseInt(document.getElementById("inputValleyWindow").value);
+      const s = fusedFiltered.slice(-valleyWindow);
       const sMin = Math.min(...s);
-      const sIdx = s.indexOf(sMin);
       const sMax = Math.max(...s);
+      const sIdx = s.indexOf(sMin);
       const amplitude = sMax - sMin;
+
       recentAmplitudes.push(amplitude);
       if (recentAmplitudes.length > maxHistory) recentAmplitudes.shift();
 
-      const ampThresh = Math.max(1.5, mean(recentAmplitudes) - 0.5 * std(recentAmplitudes));
-      const corrThresh = Math.max(0.7, mean(recentCorrelations) - 0.3 * std(recentCorrelations));
+      const ampThresh = Math.max(parseFloat(document.getElementById("inputAmp").value), mean(recentAmplitudes) - 0.5 * std(recentAmplitudes));
+      const corrThresh = Math.max(parseFloat(document.getElementById("inputCorr").value), mean(recentCorrelations) - 0.3 * std(recentCorrelations));
+      const valleyPositions = document.getElementById("inputValleyPos").value.split(",").map(x => parseInt(x.trim()));
 
-      if (
-        VALLEY_POSITIONS.includes(sIdx) &&
-        (r > corrThresh || amplitude > ampThresh)
-      ) {
+      if (valleyPositions.includes(sIdx) && (r > corrThresh || amplitude > ampThresh)) {
         const now = buffer[buffer.length - 1].t;
         const intervals = repTimes.slice(-3).map((t, i, arr) => i > 0 ? t - arr[i - 1] : null).filter(Boolean);
-        const avgInterval = intervals.length ? mean(intervals) : MIN_CD;
-        const cooldown = Math.min(Math.max(ADAPTIVE_K * avgInterval, MIN_CD), MAX_CD);
+        const avgInterval = intervals.length ? mean(intervals) : parseFloat(document.getElementById("inputMinCD").value);
+        const cooldown = Math.min(
+          Math.max(parseFloat(document.getElementById("inputAdaptiveK").value) * avgInterval,
+          parseFloat(document.getElementById("inputMinCD").value)),
+          parseFloat(document.getElementById("inputMaxCD").value)
+        );
 
         if (now - lastPeakTime >= cooldown) {
+          repTimes.push(now);
           lastPeakTime = now;
           repCount++;
           countDisplay.textContent = repCount;
@@ -138,33 +147,8 @@
           chimeSound.play();
         }
       }
-    }
 
-    const repTimes = [];
-
-    function pearson(x, y) {
-      const n = x.length;
-      const meanX = mean(x);
-      const meanY = mean(y);
-      let num = 0, dx2 = 0, dy2 = 0;
-      for (let i = 0; i < n; i++) {
-        const dx = x[i] - meanX;
-        const dy = y[i] - meanY;
-        num += dx * dy;
-        dx2 += dx * dx;
-        dy2 += dy * dy;
-      }
-      const denom = Math.sqrt(dx2 * dy2);
-      return denom === 0 ? 0 : num / denom;
-    }
-
-    function mean(arr) {
-      return arr.reduce((a, b) => a + b, 0) / arr.length;
-    }
-
-    function std(arr) {
-      const m = mean(arr);
-      return Math.sqrt(arr.reduce((sum, val) => sum + (val - m) ** 2, 0) / arr.length);
+      gyroReadout.textContent = `Gyro Z: ${gz.toFixed(2)}`;
     }
 
     function padArray(arr, size, padValue = 'replicate') {
@@ -234,6 +218,30 @@
       }
 
       return output;
+    }
+
+    function pearson(x, y) {
+      const n = x.length;
+      const meanX = mean(x), meanY = mean(y);
+      let num = 0, dx2 = 0, dy2 = 0;
+      for (let i = 0; i < n; i++) {
+        const dx = x[i] - meanX;
+        const dy = y[i] - meanY;
+        num += dx * dy;
+        dx2 += dx * dx;
+        dy2 += dy * dy;
+      }
+      const denom = Math.sqrt(dx2 * dy2);
+      return denom === 0 ? 0 : num / denom;
+    }
+
+    function mean(arr) {
+      return arr.reduce((a, b) => a + b, 0) / arr.length;
+    }
+
+    function std(arr) {
+      const m = mean(arr);
+      return Math.sqrt(arr.reduce((sum, val) => sum + (val - m) ** 2, 0) / arr.length);
     }
   </script>
 </body>
