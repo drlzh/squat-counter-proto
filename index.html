@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Adaptive Squat Counter DS1</title>
+  <style>
+    body { font-family: sans-serif; text-align: center; padding: 2rem; }
+    h1 { font-size: 2.5rem; margin-bottom: 1rem; }
+    #count { font-size: 4rem; color: seagreen; }
+    #status { margin-top: 1rem; font-size: 1.1rem; white-space: pre-line; }
+    label { display: block; margin-top: 1rem; font-size: 1rem; }
+    input[type="number"], input[type="text"] { padding: 0.3rem; font-size: 1rem; width: 100px; }
+    button { font-size: 1.2rem; padding: 0.6rem 1.2rem; margin-top: 1rem; }
+    .config { margin: 1rem auto; max-width: 600px; text-align: left; }
+    #repLog { margin-top: 1rem; max-height: 250px; overflow-y: auto; text-align: left; white-space: pre-line; }
+    .log-entry { margin-bottom: 0.5rem; padding-bottom: 0.5rem; border-bottom: 1px solid #ccc; }
+    .log-percentile { color: dodgerblue; font-weight: bold; }
+    #modelStatus { font-size: 0.9rem; margin-top: 0.5rem; color: gray; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.js"></script>
+</head>
+<body>
+  <h1>Adaptive Squat Counter DS1</h1>
+  <div id="count">0</div>
+  <div id="status">Waiting for motion permission...</div>
+  <div id="repLog"></div>
+
+  <div class="config">
+    <label><input type="checkbox" id="toggleModel" /> Enable Fitness Percentile Estimation</label>
+    <div id="modelStatus">Model not loaded.</div>
+
+    <label>TARGET_HZ: <input type="number" id="inputHz" value="50" /></label>
+    <label>SAMPLE_SIZE: <input type="number" id="inputSampleSize" value="31" /></label>
+    <label>WINDOW_DURATION (s): <input type="number" id="inputWindowDuration" value="2.0" step="0.1" /></label>
+    <label>VALLEY_WINDOW: <input type="number" id="inputValleyWindow" value="5" /></label>
+    <label>VALLEY_POSITIONS (comma-separated): <input type="text" id="inputValleyPositions" value="4" /></label>
+    <label>CORRELATION_THRESHOLD: <input type="number" id="inputThreshold" value="0.85" step="0.01" /></label>
+    <label>AMPLITUDE_THRESHOLD: <input type="number" id="inputAmpThreshold" value="2.3" step="0.1" /></label>
+    <label>ADAPTIVE_K: <input type="number" id="inputAdaptiveK" value="0.85" step="0.01" /></label>
+    <label>MIN_CD (s): <input type="number" id="inputMinCd" value="2.0" step="0.1" /></label>
+    <label>MAX_CD (s): <input type="number" id="inputMaxCd" value="3.0" step="0.1" /></label>
+  </div>
+
+  <button id="startButton">Start</button>
+  <button id="testSoundButton">Test Sound</button>
+
+  <audio id="chimeSound" src="chime.mp3" preload="auto"></audio>
+
+  <script>
+    let TARGET_HZ, SAMPLE_SIZE, WINDOW_DURATION, WINDOW_SIZE, VALLEY_WINDOW, VALLEY_POSITIONS,
+        CORRELATION_THRESHOLD, AMPLITUDE_THRESHOLD, ADAPTIVE_K, MIN_CD, MAX_CD;
+
+    let buffer = [], intervalBuffer = [];
+    let repCount = 0;
+    let lastRepTime = -Infinity;
+    let onnxSession = null;
+    let fitnessPercentileEnabled = false;
+
+    const countDisplay = document.getElementById("count");
+    const statusDisplay = document.getElementById("status");
+    const repLog = document.getElementById("repLog");
+    const startButton = document.getElementById("startButton");
+    const testSoundButton = document.getElementById("testSoundButton");
+    const chimeSound = document.getElementById("chimeSound");
+    const toggleModel = document.getElementById("toggleModel");
+    const modelStatus = document.getElementById("modelStatus");
+
+    toggleModel.onchange = async () => {
+      fitnessPercentileEnabled = toggleModel.checked;
+      if (fitnessPercentileEnabled && !onnxSession) {
+        modelStatus.textContent = "⏳ Loading model...";
+        try {
+          onnxSession = await ort.InferenceSession.create("fitness_percentile_model.onnx");
+          modelStatus.textContent = "✅ Model loaded.";
+        } catch (err) {
+          modelStatus.textContent = "❌ Model load failed.";
+          console.error("ONNX load error:", err);
+        }
+      } else if (!fitnessPercentileEnabled) {
+        modelStatus.textContent = "Model disabled.";
+      }
+    };
+
+    startButton.onclick = async () => {
+      TARGET_HZ = parseInt(document.getElementById("inputHz").value);
+      SAMPLE_SIZE = parseInt(document.getElementById("inputSampleSize").value);
+      WINDOW_DURATION = parseFloat(document.getElementById("inputWindowDuration").value);
+      WINDOW_SIZE = Math.floor(WINDOW_DURATION * TARGET_HZ);
+      VALLEY_WINDOW = parseInt(document.getElementById("inputValleyWindow").value);
+      VALLEY_POSITIONS = document.getElementById("inputValleyPositions").value.split(',').map(p => parseInt(p.trim()));
+      CORRELATION_THRESHOLD = parseFloat(document.getElementById("inputThreshold").value);
+      AMPLITUDE_THRESHOLD = parseFloat(document.getElementById("inputAmpThreshold").value);
+      ADAPTIVE_K = parseFloat(document.getElementById("inputAdaptiveK").value);
+      MIN_CD = parseFloat(document.getElementById("inputMinCd").value);
+      MAX_CD = parseFloat(document.getElementById("inputMaxCd").value);
+
+      startButton.disabled = true;
+      buffer = [];
+      intervalBuffer = [];
+      repCount = 0;
+      lastRepTime = -Infinity;
+      countDisplay.textContent = "0";
+      statusDisplay.textContent = "Tracking motion... Start squatting!";
+
+      try {
+        if (typeof DeviceMotionEvent.requestPermission === "function") {
+          const response = await DeviceMotionEvent.requestPermission();
+          if (response !== "granted") throw new Error("Permission denied");
+        }
+        window.addEventListener("devicemotion", handleMotion);
+      } catch (err) {
+        statusDisplay.textContent = "❌ Motion access denied.";
+        console.error(err);
+      }
+    };
+
+    testSoundButton.onclick = () => {
+      chimeSound.currentTime = 0;
+      chimeSound.play().catch(err => {
+        alert("Audio could not play. Try interacting with the page first.");
+      });
+    };
+
+    async function predictPercentile(descentSpeed, sharpness) {
+      if (!onnxSession) return null;
+      try {
+        const inputTensor = new ort.Tensor('float32', new Float32Array([descentSpeed, sharpness]), [1, 2]);
+        const results = await onnxSession.run({ input: inputTensor });
+        return results[Object.keys(results)[0]].data[0];
+      } catch (err) {
+        console.error("❌ ONNX inference error:", err.message);
+        return null;
+      }
+    }
+
+    function handleMotion(event) {
+      const acc = event.accelerationIncludingGravity;
+      const now = Date.now() / 1000;
+      if (!acc?.y || !acc?.z) return;
+
+      buffer.push({ x: acc.x, y: -acc.y, z: acc.z, t: now });
+      if (buffer.length > 2 * TARGET_HZ) buffer.shift();
+      if (buffer.length < SAMPLE_SIZE) return;
+
+      const y = buffer.map(p => p.y);
+      const z = buffer.map(p => p.z);
+      const yFiltered = savitzkyGolay(y);
+      const zFiltered = savitzkyGolay(z);
+      const signal = yFiltered.map((yVal, i) => (yVal + zFiltered[i]) / 2);
+
+      const r = pearson(yFiltered, zFiltered);
+      if (r < CORRELATION_THRESHOLD || signal.length < VALLEY_WINDOW) return;
+
+      const s = signal.slice(-VALLEY_WINDOW);
+      const t = buffer[buffer.length - 1].t;
+      const isValley = VALLEY_POSITIONS.every(i => s[i] < Math.min(...s.filter((_, idx) => idx !== i)));
+      const amp = Math.abs(s[VALLEY_POSITIONS[0]]);
+      const timeSinceLast = t - lastRepTime;
+      const avgInterval = intervalBuffer.length >= 2
+        ? intervalBuffer.reduce((a, b) => a + b, 0) / intervalBuffer.length
+        : MIN_CD;
+
+      const cooldown = Math.max(MIN_CD, Math.min(MAX_CD, ADAPTIVE_K * avgInterval));
+
+      if (isValley && amp > AMPLITUDE_THRESHOLD && timeSinceLast >= cooldown) {
+        repCount++;
+        countDisplay.textContent = repCount.toString();
+        intervalBuffer.push(timeSinceLast);
+        if (intervalBuffer.length > 10) intervalBuffer.shift();
+        lastRepTime = t;
+
+        const windowSize = Math.floor(TARGET_HZ);
+        const seg = buffer.slice(Math.max(0, buffer.length - windowSize));
+        const mag = seg.map(p => Math.sqrt(p.x ** 2 + p.y ** 2 + p.z ** 2));
+        const time = seg.map(p => p.t);
+
+        const vel = [0];
+        for (let i = 1; i < mag.length; i++) {
+          const dt = time[i] - time[i - 1];
+          vel.push(vel[i - 1] + 0.5 * (mag[i] + mag[i - 1]) * dt);
+        }
+
+        const disp = [0];
+        for (let i = 1; i < vel.length; i++) {
+          const dt = time[i] - time[i - 1];
+          disp.push(disp[i - 1] + 0.5 * (vel[i] + vel[i - 1]) * dt);
+        }
+
+        const displacement = disp[disp.length - 1] - disp[0];
+        const descentDuration = time[time.length - 1] - time[0];
+        const descentSpeed = displacement / descentDuration;
+
+        let speedQuality = "✅ Good";
+        if (descentSpeed < 0.3) speedQuality = "⚠️ Slow";
+        if (descentSpeed < 0.15) speedQuality = "❌ Ineffective";
+
+        const rawFused = seg.map(p => (p.y + p.z) / 2);
+        function computeSharpness(sig, thresholdRatio = 0.5) {
+          const min = Math.min(...sig);
+          const max = Math.max(...sig);
+          const depth = max - min;
+          const valleyIndex = sig.indexOf(min);
+          let left = valleyIndex, right = valleyIndex;
+          while (left > 0 && sig[left] < min + thresholdRatio * depth) left--;
+          while (right < sig.length - 1 && sig[right] < min + thresholdRatio * depth) right++;
+          const width = right - left + 1;
+          return depth / width;
+        }
+
+        const sharpness = computeSharpness(rawFused);
+        let sharpQuality = "✅ Good";
+        if (sharpness < 0.3) sharpQuality = "⚠️ Flat or Slow";
+        if (sharpness < 0.15) sharpQuality = "❌ No Clear Dip";
+
+        const logText = 
+          `#${repCount} @ ${t.toFixed(2)}s\n` +
+          `↳ Descent Speed: ${descentSpeed.toFixed(3)} (${speedQuality})\n` +
+          `↳ Sharpness: ${sharpness.toFixed(3)} (${sharpQuality})`;
+
+        statusDisplay.textContent = logText;
+
+        const logEntry = document.createElement("div");
+        logEntry.className = "log-entry";
+        logEntry.textContent = logText;
+        repLog.appendChild(logEntry);
+
+        if (fitnessPercentileEnabled && onnxSession) {
+          predictPercentile(descentSpeed, sharpness).then(percentile => {
+            if (percentile !== null) {
+              const pLine = document.createElement("div");
+              pLine.className = "log-percentile";
+              pLine.textContent = `↳ Estimated Fitness Percentile: ${percentile.toFixed(2)}%`;
+              logEntry.appendChild(pLine);
+            }
+          });
+        }
+
+        chimeSound.currentTime = 0;
+        chimeSound.play().catch(() => {});
+      }
+    }
+
+    function pearson(x, y) {
+      const n = x.length;
+      const meanX = x.reduce((a, b) => a + b, 0) / n;
+      const meanY = y.reduce((a, b) => a + b, 0) / n;
+      let num = 0, dx2 = 0, dy2 = 0;
+      for (let i = 0; i < n; i++) {
+        const dx = x[i] - meanX;
+        const dy = y[i] - meanY;
+        num += dx * dy;
+        dx2 += dx * dx;
+        dy2 += dy * dy;
+      }
+      const denom = Math.sqrt(dx2 * dy2);
+      return denom === 0 ? 0 : num / denom;
+    }
+
+    function padArray(arr, size, padValue = 'replicate') {
+      const pre = [], post = [];
+      for (let i = 0; i < size; i++) {
+        pre.push(padValue === 'replicate' ? arr[0] : 0);
+        post.push(padValue === 'replicate' ? arr[arr.length - 1] : 0);
+      }
+      return [...pre, ...arr, ...post];
+    }
+
+    function savitzkyGolay(data, h = 1, options = {}) {
+      const { windowSize = 5, derivative = 0, polynomial = 2, pad = 'none', padValue = 'replicate' } = options;
+      if (windowSize % 2 === 0 || windowSize < 5) throw new RangeError('Window size must be odd and >= 5');
+      const step = Math.floor(windowSize / 2);
+      if (pad === 'pre') data = padArray(data, step, padValue);
+      let C, norm;
+      if (windowSize === 5 && polynomial === 2 && [0, 1, 2].includes(derivative)) {
+        if (derivative === 0) [C, norm] = [[-3, 12, 17, 12, -3], 35];
+        if (derivative === 1) [C, norm] = [[-2, -1, 0, 1, 2], 10];
+        if (derivative === 2) [C, norm] = [[2, -1, -2, -1, 2], 7];
+      } else throw new Error("Only common SG cases supported");
+      const det = norm * Math.pow(h, derivative);
+      const output = [];
+      for (let k = 0; k <= data.length - windowSize; k++) {
+        let acc = 0;
+        for (let l = 0; l < windowSize; l++) acc += (C[l] * data[k + l]) / det;
+        output.push(acc);
+      }
+      return pad === 'post' ? padArray(output, step, padValue) : output;
+    }
+  </script>
+</body>
+</html>
