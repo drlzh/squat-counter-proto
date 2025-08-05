@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Adaptive Squat Counter J3</title>
+  <style>
+    body { font-family: sans-serif; text-align: center; padding: 2rem; }
+    h1 { font-size: 2.5rem; margin-bottom: 1rem; }
+    #count { font-size: 4rem; color: seagreen; }
+    #status { margin-top: 1rem; font-size: 1.1rem; }
+    label { display: block; margin-top: 1rem; font-size: 1rem; }
+    input { padding: 0.3rem; font-size: 1rem; width: 100px; }
+    button { font-size: 1.2rem; padding: 0.6rem 1.2rem; margin-top: 1rem; }
+    .config { margin: 1rem auto; max-width: 600px; text-align: left; }
+    #repLog { margin-top: 1rem; max-height: 200px; overflow-y: auto; text-align: left; }
+  </style>
+</head>
+<body>
+  <h1>Adaptive Squat Counter J3</h1>
+  <div id="count">0</div>
+  <div id="status">Waiting for motion permission...</div>
+  <div id="repLog"></div>
+
+  <div class="config">
+    <label>TARGET_HZ: <input type="number" id="inputHz" value="50" /></label>
+    <label>SAMPLE_SIZE: <input type="number" id="inputSampleSize" value="31" /></label>
+    <label>WINDOW_DURATION (s): <input type="number" id="inputWindowDuration" value="2.0" step="0.1" /></label>
+    <label>VALLEY_WINDOW: <input type="number" id="inputValleyWindow" value="5" /></label>
+    <label>VALLEY_POSITIONS (comma-separated): <input type="text" id="inputValleyPositions" value="2" /></label>
+    <label>CORRELATION_THRESHOLD: <input type="number" id="inputThreshold" value="0.85" step="0.01" /></label>
+    <label>AMPLITUDE_THRESHOLD: <input type="number" id="inputAmpThreshold" value="2.5" step="0.1" /></label>
+    <label>ADAPTIVE_K: <input type="number" id="inputAdaptiveK" value="0.75" step="0.01" /></label>
+    <label>MIN_CD (s): <input type="number" id="inputMinCd" value="1.0" step="0.1" /></label>
+    <label>MAX_CD (s): <input type="number" id="inputMaxCd" value="2.5" step="0.1" /></label>
+  </div>
+
+  <button id="startButton">Start</button>
+  <button id="testSoundButton">Test Sound</button>
+
+  <audio id="chimeSound" src="chime.mp3" preload="auto"></audio>
+
+  <script>
+    let TARGET_HZ, SAMPLE_SIZE, WINDOW_DURATION, WINDOW_SIZE, VALLEY_WINDOW, VALLEY_POSITIONS,
+        CORRELATION_THRESHOLD, AMPLITUDE_THRESHOLD, ADAPTIVE_K, MIN_CD, MAX_CD;
+
+    let buffer = [], intervalBuffer = [];
+    let repCount = 0;
+    let lastRepTime = -Infinity;
+
+    const countDisplay = document.getElementById("count");
+    const statusDisplay = document.getElementById("status");
+    const startButton = document.getElementById("startButton");
+    const testSoundButton = document.getElementById("testSoundButton");
+    const chimeSound = document.getElementById("chimeSound");
+    const repLog = document.getElementById("repLog");
+
+    startButton.onclick = async () => {
+      TARGET_HZ = parseInt(document.getElementById("inputHz").value);
+      SAMPLE_SIZE = parseInt(document.getElementById("inputSampleSize").value);
+      WINDOW_DURATION = parseFloat(document.getElementById("inputWindowDuration").value);
+      WINDOW_SIZE = Math.floor(WINDOW_DURATION * TARGET_HZ);
+      VALLEY_WINDOW = parseInt(document.getElementById("inputValleyWindow").value);
+      VALLEY_POSITIONS = document.getElementById("inputValleyPositions").value.split(',').map(p => parseInt(p.trim()));
+      CORRELATION_THRESHOLD = parseFloat(document.getElementById("inputThreshold").value);
+      AMPLITUDE_THRESHOLD = parseFloat(document.getElementById("inputAmpThreshold").value);
+      ADAPTIVE_K = parseFloat(document.getElementById("inputAdaptiveK").value);
+      MIN_CD = parseFloat(document.getElementById("inputMinCd").value);
+      MAX_CD = parseFloat(document.getElementById("inputMaxCd").value);
+
+      startButton.disabled = true;
+      buffer = [];
+      intervalBuffer = [];
+      repCount = 0;
+      lastRepTime = -Infinity;
+      countDisplay.textContent = "0";
+      statusDisplay.textContent = "Requesting permission...";
+
+      try {
+        if (typeof DeviceMotionEvent.requestPermission === "function") {
+          const response = await DeviceMotionEvent.requestPermission();
+          if (response !== "granted") throw new Error("Permission denied");
+        }
+        window.addEventListener("devicemotion", handleMotion);
+        statusDisplay.textContent = "Tracking motion... Start squatting!";
+      } catch (err) {
+        statusDisplay.textContent = "❌ Motion access denied.";
+        console.error(err);
+      }
+    };
+
+    testSoundButton.onclick = () => {
+      chimeSound.currentTime = 0;
+      chimeSound.play().catch(err => {
+        console.warn("🔇 Test audio playback failed:", err);
+        alert("Audio could not play. Try interacting with the page first.");
+      });
+    };
+
+  function handleMotion(event) {
+  const acc = event.accelerationIncludingGravity;
+  const now = Date.now() / 1000;
+  if (!acc?.x || !acc?.y || !acc?.z) return;
+
+  buffer.push({ x: acc.x, y: -acc.y, z: acc.z, t: now });
+  if (buffer.length > 2 * TARGET_HZ) buffer.shift();
+  if (buffer.length < SAMPLE_SIZE) return;
+
+  const x = buffer.map(p => p.x);
+  const y = buffer.map(p => p.y);
+  const z = buffer.map(p => p.z);
+
+  const xFiltered = savitzkyGolay(x);
+  const yFiltered = savitzkyGolay(y);
+  const zFiltered = savitzkyGolay(z);
+
+  const fused = xFiltered.map((_, i) =>
+    Math.sqrt(xFiltered[i] ** 2 + yFiltered[i] ** 2 + zFiltered[i] ** 2)
+  );
+
+  // --- Peak/trough-based descent detection ---
+  const s = fused.slice(-VALLEY_WINDOW);
+  const t = buffer[buffer.length - 1].t;
+  const isValley = VALLEY_POSITIONS.every(i => s[i] < Math.min(...s.filter((_, idx) => idx !== i)));
+  const amp = Math.abs(s[VALLEY_POSITIONS[0]]);
+  const timeSinceLast = t - lastRepTime;
+  const avgInterval = intervalBuffer.length >= 2
+    ? intervalBuffer.reduce((a, b) => a + b, 0) / intervalBuffer.length
+    : MIN_CD;
+
+  const cooldown = Math.max(MIN_CD, Math.min(MAX_CD, ADAPTIVE_K * avgInterval));
+
+  if (isValley && amp > AMPLITUDE_THRESHOLD && timeSinceLast >= cooldown) {
+    repCount++;
+    countDisplay.textContent = repCount.toString();
+    intervalBuffer.push(timeSinceLast);
+    if (intervalBuffer.length > 10) intervalBuffer.shift();
+    lastRepTime = t;
+
+    // Extract segment (1 sec window)
+    const windowSize = Math.floor(TARGET_HZ);
+    const seg = buffer.slice(-windowSize);
+    const accVec = seg.map(p => Math.sqrt(p.x ** 2 + p.y ** 2 + p.z ** 2));
+    const times = seg.map(p => p.t);
+
+    // Double integration via Trapezoidal Rule to estimate displacement
+    const velocity = [0];
+    for (let i = 1; i < accVec.length; i++) {
+      const dt = times[i] - times[i - 1];
+      const vi = velocity[i - 1] + 0.5 * (accVec[i] + accVec[i - 1]) * dt;
+      velocity.push(vi);
+    }
+
+    const displacement = velocity.reduce((s, v, i) =>
+      i > 0 ? s + 0.5 * (velocity[i] + velocity[i - 1]) * (times[i] - times[i - 1]) : s, 0
+    );
+
+    const descentTime = times[times.length - 1] - times[0];
+    const descentSpeed = displacement / descentTime;
+
+    // Quality buckets (tuneable)
+    let quality = "✅ Good";
+    if (descentSpeed < 0.5) quality = "⚠️ Slow";
+    if (descentSpeed < 0.2) quality = "❌ Too Gentle";
+
+    const speedMsg = `#${repCount} @ ${t.toFixed(2)}s — Speed: ${descentSpeed.toFixed(3)} m/s`;
+    statusDisplay.textContent = speedMsg;
+
+    const logItem = document.createElement("div");
+    logItem.textContent = speedMsg;
+    repLog.appendChild(logItem);
+
+    chimeSound.currentTime = 0;
+    chimeSound.play().catch(() => {});
+  }
+}
+
+
+
+    function pearson(x, y) {
+      const n = x.length;
+      const meanX = x.reduce((a, b) => a + b, 0) / n;
+      const meanY = y.reduce((a, b) => a + b, 0) / n;
+      let num = 0, dx2 = 0, dy2 = 0;
+      for (let i = 0; i < n; i++) {
+        const dx = x[i] - meanX;
+        const dy = y[i] - meanY;
+        num += dx * dy;
+        dx2 += dx * dx;
+        dy2 += dy * dy;
+      }
+      const denom = Math.sqrt(dx2 * dy2);
+      return denom === 0 ? 0 : num / denom;
+    }
+
+    function padArray(arr, size, padValue = 'replicate') {
+      const pre = [], post = [];
+      for (let i = 0; i < size; i++) {
+        if (padValue === 'replicate') {
+          pre.push(arr[0]);
+          post.push(arr[arr.length - 1]);
+        } else {
+          pre.push(0);
+          post.push(0);
+        }
+      }
+      return [...pre, ...arr, ...post];
+    }
+
+    function savitzkyGolay(data, h = 1, options = {}) {
+      const {
+        windowSize = 5,
+        derivative = 0,
+        polynomial = 2,
+        pad = 'none',
+        padValue = 'replicate'
+      } = options;
+
+      if (windowSize % 2 === 0 || windowSize < 5) {
+        throw new RangeError('Window size must be odd and >= 5');
+      }
+
+      const step = Math.floor(windowSize / 2);
+      if (pad === 'pre') {
+        data = padArray(data, step, padValue);
+      }
+
+      let C, norm;
+      if (
+        windowSize === 5 &&
+        polynomial === 2 &&
+        (derivative === 0 || derivative === 1 || derivative === 2)
+      ) {
+        if (derivative === 0) {
+          C = [-3, 12, 17, 12, -3];
+          norm = 35;
+        } else if (derivative === 1) {
+          C = [-2, -1, 0, 1, 2];
+          norm = 10;
+        } else if (derivative === 2) {
+          C = [2, -1, -2, -1, 2];
+          norm = 7;
+        }
+      } else {
+        throw new Error('Only common case is supported in this demo');
+      }
+
+      const det = norm * Math.pow(h, derivative);
+      const output = [];
+      for (let k = 0; k <= data.length - windowSize; k++) {
+        let acc = 0;
+        for (let l = 0; l < windowSize; l++) {
+          acc += (C[l] * data[k + l]) / det;
+        }
+        output.push(acc);
+      }
+
+      if (pad === 'post') {
+        return padArray(output, step, padValue);
+      }
+
+      return output;
+    }
+  </script>
+</body>
+</html>
