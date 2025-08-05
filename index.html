@@ -2,53 +2,103 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Squat Counter</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Squat Counter (Adjustable)</title>
   <style>
     body { font-family: sans-serif; text-align: center; padding: 2rem; }
     h1 { font-size: 2.5rem; margin-bottom: 1rem; }
     #count { font-size: 4rem; color: seagreen; }
     #status { margin-top: 1rem; font-size: 1.1rem; }
-    button { font-size: 1.2rem; padding: 0.6rem 1.2rem; margin-top: 2rem; }
+    input[type="number"] { width: 80px; margin: 0.2rem; font-size: 1rem; padding: 0.2rem; }
+    label { display: inline-block; width: 200px; text-align: right; margin-right: 10px; }
+    .controls { margin-bottom: 1rem; }
+    button { font-size: 1.2rem; padding: 0.6rem 1.2rem; margin: 0.5rem; }
   </style>
 </head>
 <body>
   <h1>Squat Counter</h1>
+  <div class="controls">
+    <div><label for="hz">Target Hz:</label><input type="number" id="hz" value="50" min="10" max="100" /></div>
+    <div><label for="threshold">Pearson Threshold:</label><input type="number" step="0.01" id="threshold" value="0.85" min="0" max="1" /></div>
+    <div><label for="minGap">Min Peak Gap (s):</label><input type="number" step="0.1" id="minGap" value="1.0" min="0" /></div>
+    <div><label for="windowSize">Filter Window Size:</label><input type="number" id="windowSize" value="5" min="5" step="2" /></div>
+  </div>
+
   <div id="count">0</div>
   <div id="status">Waiting for motion permission...</div>
   <button id="startButton">Start</button>
+  <button id="resetButton">Reset</button>
+
+  <!-- 🔊 Chime -->
+  <audio id="chime" src="chime.mp3" preload="auto"></audio>
 
   <script>
-    const TARGET_HZ = 50;
-    const SAMPLE_SIZE = 31;
-    const CORRELATION_THRESHOLD = 0.85;
-    const MIN_PEAK_GAP = 1.0; // seconds
-    const WINDOW_SIZE = 5;
+    let TARGET_HZ = 50;
+    let CORRELATION_THRESHOLD = 0.85;
+    let MIN_PEAK_GAP = 1.0;
+    let WINDOW_SIZE = 5;
 
-    const buffer = [];
+    let buffer = [];
     let repCount = 0;
     let lastRepTime = -MIN_PEAK_GAP;
+    let motionActive = false;
 
     const countDisplay = document.getElementById("count");
     const statusDisplay = document.getElementById("status");
     const startButton = document.getElementById("startButton");
+    const resetButton = document.getElementById("resetButton");
+    const chime = document.getElementById("chime");
 
     startButton.onclick = async () => {
-      startButton.disabled = true;
-      statusDisplay.textContent = "Requesting permission...";
+      if (motionActive) return;
 
+      // Read user parameters
+      TARGET_HZ = parseInt(document.getElementById("hz").value);
+      CORRELATION_THRESHOLD = parseFloat(document.getElementById("threshold").value);
+      MIN_PEAK_GAP = parseFloat(document.getElementById("minGap").value);
+      WINDOW_SIZE = parseInt(document.getElementById("windowSize").value);
+
+      if (WINDOW_SIZE % 2 === 0 || WINDOW_SIZE < 5) {
+        alert("Window size must be an odd number ≥ 5.");
+        return;
+      }
+
+      startButton.disabled = true;
+      resetButton.disabled = false;
+
+      statusDisplay.textContent = "Requesting motion access...";
       try {
-        if (typeof DeviceMotionEvent.requestPermission === "function") {
+        if (typeof DeviceMotionEvent?.requestPermission === "function") {
           const response = await DeviceMotionEvent.requestPermission();
           if (response !== "granted") throw new Error("Permission denied");
         }
 
+        // Prime audio system
+        try {
+          await chime.play();
+          chime.pause();
+          chime.currentTime = 0;
+        } catch (_) {}
+
         window.addEventListener("devicemotion", handleMotion);
         statusDisplay.textContent = "Tracking motion... Start squatting!";
+        motionActive = true;
       } catch (err) {
         statusDisplay.textContent = "❌ Motion access denied.";
         console.error(err);
       }
+    };
+
+    resetButton.onclick = () => {
+      buffer = [];
+      repCount = 0;
+      lastRepTime = -MIN_PEAK_GAP;
+      countDisplay.textContent = "0";
+      statusDisplay.textContent = "Reset. Ready to start again.";
+      motionActive = false;
+      startButton.disabled = false;
+      resetButton.disabled = true;
+      window.removeEventListener("devicemotion", handleMotion);
     };
 
     function handleMotion(event) {
@@ -58,14 +108,11 @@
       if (!acc?.y || !acc?.z) return;
 
       buffer.push({ y: -acc.y, z: acc.z, t: now });
-      const maxBuffer = 2 * TARGET_HZ;
-      if (buffer.length > maxBuffer) buffer.shift();
-
-      if (buffer.length < maxBuffer) return;
+      if (buffer.length > 2 * TARGET_HZ) buffer.shift();
+      if (buffer.length < 2 * TARGET_HZ) return;
 
       const y = buffer.map(p => p.y);
       const z = buffer.map(p => p.z);
-
       const yFiltered = savitzkyGolay(y);
       const zFiltered = savitzkyGolay(z);
       const signal = yFiltered.map((yVal, i) => (yVal + zFiltered[i]) / 2);
@@ -77,11 +124,25 @@
 
         if (s[2] < Math.min(s[0], s[1], s[3], s[4]) && t - lastRepTime >= MIN_PEAK_GAP) {
           repCount++;
+          lastRepTime = t;
           countDisplay.textContent = repCount.toString();
           statusDisplay.textContent = `✅ Rep @ ${t.toFixed(2)}s`;
-          lastRepTime = t;
-       }
+          playChimeSafe();
+        }
       }
+    }
+
+    function playChimeSafe() {
+      requestAnimationFrame(() => {
+        try {
+          chime.currentTime = 0;
+          chime.play().catch(err => {
+            console.warn("Audio play blocked:", err);
+          });
+        } catch (err) {
+          console.warn("Audio error:", err);
+        }
+      });
     }
 
     function pearson(x, y) {
@@ -100,81 +161,32 @@
       return denom === 0 ? 0 : num / denom;
     }
 
-    function factorial(n) {
-      let r = 1;
-      while (n > 0) r *= n--;
-      return r;
-    }
+    function savitzkyGolay(data) {
+      if (data.length < WINDOW_SIZE) return data;
 
-    function padArray(arr, size, padValue = 'replicate') {
-      const pre = [];
-      const post = [];
-      for (let i = 0; i < size; i++) {
-        if (padValue === 'replicate') {
-          pre.push(arr[0]);
-          post.push(arr[arr.length - 1]);
-        } else {
-          pre.push(0);
-          post.push(0);
-        }
-      }
-      return [...pre, ...arr, ...post];
-    }
-
-    function savitzkyGolay(data, h = 1, options = {}) {
-      const {
-        windowSize = 5,
-        derivative = 0,
-        polynomial = 2,
-        pad = 'none',
-        padValue = 'replicate'
-      } = options;
-
-      if (windowSize % 2 === 0 || windowSize < 5) {
-        throw new RangeError('Window size must be odd and >= 5');
-      }
-
-      const step = Math.floor(windowSize / 2);
-      if (pad === 'pre') {
-        data = padArray(data, step, padValue);
-      }
-
+      // Generate filter coefficients for common windowSize=5
       let C, norm;
-      if (
-        windowSize === 5 &&
-        polynomial === 2 &&
-        (derivative === 0 || derivative === 1 || derivative === 2)
-      ) {
-        // Precomputed common case
-        if (derivative === 0) {
-          C = [-3, 12, 17, 12, -3];
-          norm = 35;
-        } else if (derivative === 1) {
-          C = [-2, -1, 0, 1, 2];
-          norm = 10;
-        } else if (derivative === 2) {
-          C = [2, -1, -2, -1, 2];
-          norm = 7;
-        }
+      if (WINDOW_SIZE === 5) {
+        C = [-3, 12, 17, 12, -3];
+        norm = 35;
       } else {
-        throw new Error('Only common case is supported in this standalone demo');
+        // Simple triangle filter for fallback (not true SG)
+        C = Array.from({ length: WINDOW_SIZE }, (_, i) => 1);
+        norm = C.reduce((a, b) => a + b);
       }
 
-      const det = norm * Math.pow(h, derivative);
-      const output = [];
-      for (let k = 0; k <= data.length - windowSize; k++) {
+      const result = [];
+      for (let i = 0; i <= data.length - WINDOW_SIZE; i++) {
         let acc = 0;
-        for (let l = 0; l < windowSize; l++) {
-          acc += (C[l] * data[k + l]) / det;
+        for (let j = 0; j < WINDOW_SIZE; j++) {
+          acc += (C[j] * data[i + j]) / norm;
         }
-        output.push(acc);
+        result.push(acc);
       }
 
-      if (pad === 'post') {
-        return padArray(output, step, padValue);
-      }
-
-      return output;
+      // Pad to match length
+      while (result.length < data.length) result.push(result[result.length - 1]);
+      return result;
     }
   </script>
 </body>
