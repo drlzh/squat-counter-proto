@@ -11,7 +11,7 @@
     #status { margin-top: 1rem; font-size: 1.1rem; }
     label { display: block; margin-top: 1rem; font-size: 1rem; }
     input { padding: 0.3rem; font-size: 1rem; width: 80px; }
-    button { font-size: 1.2rem; padding: 0.6rem 1.2rem; margin-top: 2rem; }
+    button { font-size: 1.2rem; padding: 0.6rem 1.2rem; margin-top: 1rem; }
     .config { margin: 1rem auto; max-width: 400px; text-align: left; }
   </style>
 </head>
@@ -29,6 +29,9 @@
   </div>
 
   <button id="startButton">Start</button>
+  <button id="testSoundButton">Test Sound</button>
+
+  <audio id="chimeSound" src="chime.mp3" preload="auto"></audio>
 
   <script>
     let TARGET_HZ, SAMPLE_SIZE, CORRELATION_THRESHOLD, MIN_PEAK_GAP, WINDOW_SIZE;
@@ -39,9 +42,10 @@
     const countDisplay = document.getElementById("count");
     const statusDisplay = document.getElementById("status");
     const startButton = document.getElementById("startButton");
+    const testSoundButton = document.getElementById("testSoundButton");
+    const chimeSound = document.getElementById("chimeSound");
 
     startButton.onclick = async () => {
-      // Read values from input fields
       TARGET_HZ = parseInt(document.getElementById("inputHz").value);
       SAMPLE_SIZE = parseInt(document.getElementById("inputSampleSize").value);
       CORRELATION_THRESHOLD = parseFloat(document.getElementById("inputThreshold").value);
@@ -66,6 +70,14 @@
         statusDisplay.textContent = "❌ Motion access denied.";
         console.error(err);
       }
+    };
+
+    testSoundButton.onclick = () => {
+      chimeSound.currentTime = 0;
+      chimeSound.play().catch(err => {
+        console.warn("🔇 Test audio playback failed:", err);
+        alert("Audio could not play. Try interacting with the page first.");
+      });
     };
 
     function handleMotion(event) {
@@ -96,6 +108,9 @@
           countDisplay.textContent = repCount.toString();
           statusDisplay.textContent = `✅ Rep @ ${t.toFixed(2)}s`;
           lastRepTime = t;
+
+          chimeSound.currentTime = 0;
+          chimeSound.play().catch(err => console.warn("🔇 Audio playback failed:", err));
         }
       }
     }
@@ -155,7 +170,6 @@
         polynomial === 2 &&
         (derivative === 0 || derivative === 1 || derivative === 2)
       ) {
-        // Precomputed
         if (derivative === 0) {
           C = [-3, 12, 17, 12, -3];
           norm = 35;
