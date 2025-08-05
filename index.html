@@ -8,13 +8,13 @@
     body { font-family: sans-serif; text-align: center; padding: 2rem; }
     h1 { font-size: 2.5rem; margin-bottom: 1rem; }
     #count { font-size: 4rem; color: seagreen; }
-    #status { margin-top: 1rem; font-size: 1.1rem; }
+    #status { margin-top: 1rem; font-size: 1.1rem; white-space: pre-line; }
+    #percentileDisplay { margin-top: 0.5rem; font-size: 1rem; color: dodgerblue; }
     label { display: block; margin-top: 1rem; font-size: 1rem; }
     input[type="number"], input[type="text"] { padding: 0.3rem; font-size: 1rem; width: 100px; }
     button { font-size: 1.2rem; padding: 0.6rem 1.2rem; margin-top: 1rem; }
     .config { margin: 1rem auto; max-width: 600px; text-align: left; }
     #repLog { margin-top: 1rem; max-height: 200px; overflow-y: auto; text-align: left; white-space: pre-line; }
-    .toggle { margin-top: 1rem; }
     #modelStatus { font-size: 0.9rem; margin-top: 0.5rem; color: gray; }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.js"></script>
@@ -23,6 +23,7 @@
   <h1>Adaptive Squat Counter DS1</h1>
   <div id="count">0</div>
   <div id="status">Waiting for motion permission...</div>
+  <div id="percentileDisplay">↳ Percentile: (disabled)</div>
   <div id="repLog"></div>
 
   <div class="config">
@@ -53,12 +54,13 @@
     let buffer = [], intervalBuffer = [];
     let repCount = 0;
     let lastRepTime = -Infinity;
-
     let onnxSession = null;
     let fitnessPercentileEnabled = false;
+    let latestRepId = 0;
 
     const countDisplay = document.getElementById("count");
     const statusDisplay = document.getElementById("status");
+    const percentileDisplay = document.getElementById("percentileDisplay");
     const startButton = document.getElementById("startButton");
     const testSoundButton = document.getElementById("testSoundButton");
     const chimeSound = document.getElementById("chimeSound");
@@ -68,13 +70,16 @@
 
     toggleModel.onchange = async () => {
       fitnessPercentileEnabled = toggleModel.checked;
+      percentileDisplay.textContent = fitnessPercentileEnabled ? "↳ Percentile: (loading...)" : "↳ Percentile: (disabled)";
       if (fitnessPercentileEnabled && !onnxSession) {
         modelStatus.textContent = "⏳ Loading ONNX model...";
         try {
-          onnxSession = await ort.InferenceSession.create('fitness_percentile_model.onnx');
+          onnxSession = await ort.InferenceSession.create("fitness_percentile_model.onnx");
           modelStatus.textContent = "✅ ONNX model loaded.";
+          percentileDisplay.textContent = "↳ Percentile: awaiting data...";
         } catch (err) {
           modelStatus.textContent = "❌ Model load failed.";
+          percentileDisplay.textContent = "↳ Percentile: (error)";
           console.error("ONNX load error:", err);
         }
       } else if (!fitnessPercentileEnabled) {
@@ -100,8 +105,10 @@
       intervalBuffer = [];
       repCount = 0;
       lastRepTime = -Infinity;
+      latestRepId = 0;
       countDisplay.textContent = "0";
       statusDisplay.textContent = "Requesting permission...";
+      percentileDisplay.textContent = fitnessPercentileEnabled ? "↳ Percentile: awaiting data..." : "↳ Percentile: (disabled)";
 
       try {
         if (typeof DeviceMotionEvent.requestPermission === "function") {
@@ -119,7 +126,6 @@
     testSoundButton.onclick = () => {
       chimeSound.currentTime = 0;
       chimeSound.play().catch(err => {
-        console.warn("🔇 Test audio playback failed:", err);
         alert("Audio could not play. Try interacting with the page first.");
       });
     };
@@ -127,13 +133,11 @@
     async function predictPercentile(descentSpeed, sharpness) {
       if (!onnxSession) return null;
       const inputTensor = new ort.Tensor('float32', new Float32Array([descentSpeed, sharpness]), [1, 2]);
-      const feeds = { float_input: inputTensor };
       try {
-        const results = await onnxSession.run(feeds);
-        const output = results[Object.keys(results)[0]].data[0];
-        return output;
+        const result = await onnxSession.run({ float_input: inputTensor });
+        return result[Object.keys(result)[0]].data[0];
       } catch (err) {
-        console.error("❌ ONNX inference error:", err);
+        console.error("ONNX inference error:", err);
         return null;
       }
     }
@@ -169,6 +173,7 @@
 
       if (isValley && amp > AMPLITUDE_THRESHOLD && timeSinceLast >= cooldown) {
         repCount++;
+        latestRepId++;
         countDisplay.textContent = repCount.toString();
         intervalBuffer.push(timeSinceLast);
         if (intervalBuffer.length > 10) intervalBuffer.shift();
@@ -217,30 +222,29 @@
         if (sharpness < 0.3) sharpQuality = "⚠️ Flat or Slow";
         if (sharpness < 0.15) sharpQuality = "❌ No Clear Dip";
 
-        (async () => {
-          let percentileStr = "";
-          if (fitnessPercentileEnabled) {
-            const percentile = await predictPercentile(descentSpeed, sharpness);
-            if (percentile !== null) {
-              percentileStr = `\n↳ Estimated Fitness Percentile: ${percentile.toFixed(2)}%`;
+        const logText =
+          `#${repCount} @ ${t.toFixed(2)}s\n` +
+          `↳ Descent Speed: ${descentSpeed.toFixed(3)} (${speedQuality})\n` +
+          `↳ Sharpness: ${sharpness.toFixed(3)} (${sharpQuality})`;
+
+        statusDisplay.textContent = logText;
+        repLog.appendChild(Object.assign(document.createElement("div"), { textContent: logText }));
+
+        if (fitnessPercentileEnabled) {
+          const repId = latestRepId;
+          percentileDisplay.textContent = "↳ Percentile: (calculating...)";
+          predictPercentile(descentSpeed, sharpness).then(p => {
+            if (repId === latestRepId) {
+              percentileDisplay.textContent =
+                p !== null
+                  ? `↳ Estimated Fitness Percentile: ${p.toFixed(2)}%`
+                  : `↳ Percentile: (error)`;
             }
-          }
+          });
+        }
 
-          const statusMsg =
-            `#${repCount} @ ${t.toFixed(2)}s\n` +
-            `↳ Descent Speed: ${descentSpeed.toFixed(3)} (${speedQuality})\n` +
-            `↳ Sharpness: ${sharpness.toFixed(3)} (${sharpQuality})` +
-            percentileStr;
-
-          statusDisplay.textContent = statusMsg;
-
-          const logItem = document.createElement("div");
-          logItem.textContent = statusMsg;
-          repLog.appendChild(logItem);
-
-          chimeSound.currentTime = 0;
-          chimeSound.play().catch(() => {});
-        })();
+        chimeSound.currentTime = 0;
+        chimeSound.play().catch(() => {});
       }
     }
 
@@ -263,70 +267,31 @@
     function padArray(arr, size, padValue = 'replicate') {
       const pre = [], post = [];
       for (let i = 0; i < size; i++) {
-        if (padValue === 'replicate') {
-          pre.push(arr[0]);
-          post.push(arr[arr.length - 1]);
-        } else {
-          pre.push(0);
-          post.push(0);
-        }
+        pre.push(padValue === 'replicate' ? arr[0] : 0);
+        post.push(padValue === 'replicate' ? arr[arr.length - 1] : 0);
       }
       return [...pre, ...arr, ...post];
     }
 
     function savitzkyGolay(data, h = 1, options = {}) {
-      const {
-        windowSize = 5,
-        derivative = 0,
-        polynomial = 2,
-        pad = 'none',
-        padValue = 'replicate'
-      } = options;
-
-      if (windowSize % 2 === 0 || windowSize < 5) {
-        throw new RangeError('Window size must be odd and >= 5');
-      }
-
+      const { windowSize = 5, derivative = 0, polynomial = 2, pad = 'none', padValue = 'replicate' } = options;
+      if (windowSize % 2 === 0 || windowSize < 5) throw new RangeError('Window size must be odd and >= 5');
       const step = Math.floor(windowSize / 2);
-      if (pad === 'pre') {
-        data = padArray(data, step, padValue);
-      }
-
+      if (pad === 'pre') data = padArray(data, step, padValue);
       let C, norm;
-      if (
-        windowSize === 5 &&
-        polynomial === 2 &&
-        (derivative === 0 || derivative === 1 || derivative === 2)
-      ) {
-        if (derivative === 0) {
-          C = [-3, 12, 17, 12, -3];
-          norm = 35;
-        } else if (derivative === 1) {
-          C = [-2, -1, 0, 1, 2];
-          norm = 10;
-        } else if (derivative === 2) {
-          C = [2, -1, -2, -1, 2];
-          norm = 7;
-        }
-      } else {
-        throw new Error('Only common case is supported in this demo');
-      }
-
+      if (windowSize === 5 && polynomial === 2 && [0, 1, 2].includes(derivative)) {
+        if (derivative === 0) [C, norm] = [[-3, 12, 17, 12, -3], 35];
+        if (derivative === 1) [C, norm] = [[-2, -1, 0, 1, 2], 10];
+        if (derivative === 2) [C, norm] = [[2, -1, -2, -1, 2], 7];
+      } else throw new Error("Only specific SG cases supported");
       const det = norm * Math.pow(h, derivative);
       const output = [];
       for (let k = 0; k <= data.length - windowSize; k++) {
         let acc = 0;
-        for (let l = 0; l < windowSize; l++) {
-          acc += (C[l] * data[k + l]) / det;
-        }
+        for (let l = 0; l < windowSize; l++) acc += (C[l] * data[k + l]) / det;
         output.push(acc);
       }
-
-      if (pad === 'post') {
-        return padArray(output, step, padValue);
-      }
-
-      return output;
+      return pad === 'post' ? padArray(output, step, padValue) : output;
     }
   </script>
 </body>
