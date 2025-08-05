@@ -3,74 +3,86 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Adaptive Squat Counter w/ Gyro</title>
+  <title>Adaptive Squat Counter J</title>
   <style>
     body { font-family: sans-serif; text-align: center; padding: 2rem; }
     h1 { font-size: 2.5rem; margin-bottom: 1rem; }
     #count { font-size: 4rem; color: seagreen; }
     #status { margin-top: 1rem; font-size: 1.1rem; }
     label { display: block; margin-top: 1rem; font-size: 1rem; }
-    input { padding: 0.3rem; font-size: 1rem; width: 80px; }
+    input { padding: 0.3rem; font-size: 1rem; width: 100px; }
     button { font-size: 1.2rem; padding: 0.6rem 1.2rem; margin-top: 1rem; }
-    .config { margin: 1rem auto; max-width: 400px; text-align: left; }
+    .config { margin: 1rem auto; max-width: 600px; text-align: left; }
+    #repLog { margin-top: 1rem; max-height: 200px; overflow-y: auto; text-align: left; }
   </style>
 </head>
 <body>
   <h1>Adaptive Squat Counter</h1>
   <div id="count">0</div>
   <div id="status">Waiting for motion permission...</div>
-  <div id="gyroReadout">Gyro Z: 0</div>
+  <div id="repLog"></div>
 
   <div class="config">
+    <label>TARGET_HZ: <input type="number" id="inputHz" value="50" /></label>
     <label>SAMPLE_SIZE: <input type="number" id="inputSampleSize" value="31" /></label>
+    <label>WINDOW_DURATION (s): <input type="number" id="inputWindowDuration" value="2.0" step="0.1" /></label>
     <label>VALLEY_WINDOW: <input type="number" id="inputValleyWindow" value="5" /></label>
-    <label>VALLEY_POSITIONS: <input type="text" id="inputValleyPos" value="2" /></label>
-    <label>CORRELATION_THRESHOLD: <input type="number" id="inputCorr" value="0.85" step="0.01" /></label>
-    <label>AMPLITUDE_THRESHOLD: <input type="number" id="inputAmp" value="2.5" step="0.1" /></label>
+    <label>VALLEY_POSITIONS (comma-separated): <input type="text" id="inputValleyPositions" value="2" /></label>
+    <label>CORRELATION_THRESHOLD: <input type="number" id="inputThreshold" value="0.85" step="0.01" /></label>
+    <label>AMPLITUDE_THRESHOLD: <input type="number" id="inputAmpThreshold" value="2.5" step="0.1" /></label>
     <label>ADAPTIVE_K: <input type="number" id="inputAdaptiveK" value="0.75" step="0.01" /></label>
-    <label>MIN_CD: <input type="number" id="inputMinCD" value="1.0" step="0.1" /></label>
-    <label>MAX_CD: <input type="number" id="inputMaxCD" value="2.5" step="0.1" /></label>
-    <label>GYRO_SCALE: <input type="number" id="inputGyroScale" value="0.8" step="0.1" /></label>
+    <label>MIN_CD (s): <input type="number" id="inputMinCd" value="1.0" step="0.1" /></label>
+    <label>MAX_CD (s): <input type="number" id="inputMaxCd" value="2.5" step="0.1" /></label>
   </div>
 
   <button id="startButton">Start</button>
   <button id="testSoundButton">Test Sound</button>
+
   <audio id="chimeSound" src="chime.mp3" preload="auto"></audio>
 
   <script>
-    const TARGET_HZ = 50;
-    const WINDOW_DURATION = 2.0;
-    const repTimes = [];
+    let TARGET_HZ, SAMPLE_SIZE, WINDOW_DURATION, WINDOW_SIZE, VALLEY_WINDOW, VALLEY_POSITIONS,
+        CORRELATION_THRESHOLD, AMPLITUDE_THRESHOLD, ADAPTIVE_K, MIN_CD, MAX_CD;
 
-    let buffer = [], repCount = 0, lastPeakTime = -Infinity;
-    let recentAmplitudes = [], recentCorrelations = [];
-    const maxHistory = 10;
+    let buffer = [], intervalBuffer = [];
+    let repCount = 0;
+    let lastRepTime = -Infinity;
 
     const countDisplay = document.getElementById("count");
     const statusDisplay = document.getElementById("status");
-    const gyroReadout = document.getElementById("gyroReadout");
     const startButton = document.getElementById("startButton");
     const testSoundButton = document.getElementById("testSoundButton");
     const chimeSound = document.getElementById("chimeSound");
+    const repLog = document.getElementById("repLog");
 
     startButton.onclick = async () => {
-      repCount = 0;
-      lastPeakTime = -Infinity;
-      buffer = [];
-      recentAmplitudes = [];
-      recentCorrelations = [];
+      TARGET_HZ = parseInt(document.getElementById("inputHz").value);
+      SAMPLE_SIZE = parseInt(document.getElementById("inputSampleSize").value);
+      WINDOW_DURATION = parseFloat(document.getElementById("inputWindowDuration").value);
+      WINDOW_SIZE = Math.floor(WINDOW_DURATION * TARGET_HZ);
+      VALLEY_WINDOW = parseInt(document.getElementById("inputValleyWindow").value);
+      VALLEY_POSITIONS = document.getElementById("inputValleyPositions").value.split(',').map(p => parseInt(p.trim()));
+      CORRELATION_THRESHOLD = parseFloat(document.getElementById("inputThreshold").value);
+      AMPLITUDE_THRESHOLD = parseFloat(document.getElementById("inputAmpThreshold").value);
+      ADAPTIVE_K = parseFloat(document.getElementById("inputAdaptiveK").value);
+      MIN_CD = parseFloat(document.getElementById("inputMinCd").value);
+      MAX_CD = parseFloat(document.getElementById("inputMaxCd").value);
 
       startButton.disabled = true;
-      statusDisplay.textContent = "Requesting motion access...";
+      buffer = [];
+      intervalBuffer = [];
+      repCount = 0;
+      lastRepTime = -Infinity;
+      countDisplay.textContent = "0";
+      statusDisplay.textContent = "Requesting permission...";
 
       try {
         if (typeof DeviceMotionEvent.requestPermission === "function") {
           const response = await DeviceMotionEvent.requestPermission();
           if (response !== "granted") throw new Error("Permission denied");
         }
-
         window.addEventListener("devicemotion", handleMotion);
-        statusDisplay.textContent = "Tracking... Start squatting!";
+        statusDisplay.textContent = "Tracking motion... Start squatting!";
       } catch (err) {
         statusDisplay.textContent = "❌ Motion access denied.";
         console.error(err);
@@ -80,75 +92,85 @@
     testSoundButton.onclick = () => {
       chimeSound.currentTime = 0;
       chimeSound.play().catch(err => {
-        alert("Audio failed to play. Tap the page to enable audio.");
+        console.warn("🔇 Test audio playback failed:", err);
+        alert("Audio could not play. Try interacting with the page first.");
       });
     };
 
     function handleMotion(event) {
       const acc = event.accelerationIncludingGravity;
-      const rot = event.rotationRate;
-      const t = Date.now() / 1000;
+      const now = Date.now() / 1000;
+      if (!acc?.y || !acc?.z) return;
 
-      if (!acc?.y || !acc?.z || !rot?.alpha) return;
+      buffer.push({ y: -acc.y, z: acc.z, t: now });
+      if (buffer.length > 2 * TARGET_HZ) buffer.shift();
+      if (buffer.length < SAMPLE_SIZE) return;
 
-      const ay = acc.y;
-      const az = acc.z;
-      const gz = rot.alpha;
-      const gyroScale = parseFloat(document.getElementById("inputGyroScale").value);
-      const fused = ((-ay + az) / 2) + gyroScale * gz;
-
-      buffer.push({ t, fused, ay: -ay, az, gz });
-      if (buffer.length > TARGET_HZ * 2) buffer.shift();
-      if (buffer.length < TARGET_HZ * 2) return;
-
-      const yRaw = buffer.map(p => p.ay);
-      const zRaw = buffer.map(p => p.az);
-      const fusedVals = buffer.map(p => p.fused);
-
-      const sampleSize = parseInt(document.getElementById("inputSampleSize").value);
-      const yFiltered = savitzkyGolay(yRaw, 1, { windowSize: 5 });
-      const zFiltered = savitzkyGolay(zRaw, 1, { windowSize: 5 });
-      const fusedFiltered = savitzkyGolay(fusedVals, 1, { windowSize: 5 });
+      const y = buffer.map(p => p.y);
+      const z = buffer.map(p => p.z);
+      const yFiltered = savitzkyGolay(y);
+      const zFiltered = savitzkyGolay(z);
+      const signal = yFiltered.map((yVal, i) => (yVal + zFiltered[i]) / 2);
 
       const r = pearson(yFiltered, zFiltered);
-      recentCorrelations.push(r);
-      if (recentCorrelations.length > maxHistory) recentCorrelations.shift();
+      if (r < CORRELATION_THRESHOLD || signal.length < VALLEY_WINDOW) return;
 
-      const valleyWindow = parseInt(document.getElementById("inputValleyWindow").value);
-      const s = fusedFiltered.slice(-valleyWindow);
-      const sMin = Math.min(...s);
-      const sMax = Math.max(...s);
-      const sIdx = s.indexOf(sMin);
-      const amplitude = sMax - sMin;
+      const s = signal.slice(-VALLEY_WINDOW);
+      const t = buffer[buffer.length - 1].t;
+      const isValley = VALLEY_POSITIONS.every(i => s[i] < Math.min(...s.filter((_, idx) => idx !== i)));
+      const amp = Math.abs(s[VALLEY_POSITIONS[0]]);
+      const timeSinceLast = t - lastRepTime;
+      const avgInterval = intervalBuffer.length >= 2
+        ? intervalBuffer.reduce((a, b) => a + b, 0) / intervalBuffer.length
+        : MIN_CD;
 
-      recentAmplitudes.push(amplitude);
-      if (recentAmplitudes.length > maxHistory) recentAmplitudes.shift();
+      const cooldown = Math.max(MIN_CD, Math.min(MAX_CD, ADAPTIVE_K * avgInterval));
 
-      const ampThresh = Math.max(parseFloat(document.getElementById("inputAmp").value), mean(recentAmplitudes) - 0.5 * std(recentAmplitudes));
-      const corrThresh = Math.max(parseFloat(document.getElementById("inputCorr").value), mean(recentCorrelations) - 0.3 * std(recentCorrelations));
-      const valleyPositions = document.getElementById("inputValleyPos").value.split(",").map(x => parseInt(x.trim()));
+      if (isValley && amp > AMPLITUDE_THRESHOLD && timeSinceLast >= cooldown) {
+        repCount++;
+        countDisplay.textContent = repCount.toString();
+        intervalBuffer.push(timeSinceLast);
+        if (intervalBuffer.length > 10) intervalBuffer.shift();
+        lastRepTime = t;
 
-      if (valleyPositions.includes(sIdx) && (r > corrThresh || amplitude > ampThresh)) {
-        const now = buffer[buffer.length - 1].t;
-        const intervals = repTimes.slice(-3).map((t, i, arr) => i > 0 ? t - arr[i - 1] : null).filter(Boolean);
-        const avgInterval = intervals.length ? mean(intervals) : parseFloat(document.getElementById("inputMinCD").value);
-        const cooldown = Math.min(
-          Math.max(parseFloat(document.getElementById("inputAdaptiveK").value) * avgInterval,
-          parseFloat(document.getElementById("inputMinCD").value)),
-          parseFloat(document.getElementById("inputMaxCD").value)
-        );
+        // Jitter analysis (total variation)
+        const windowSize = Math.floor(TARGET_HZ);
+        const startIdx = Math.max(0, buffer.length - windowSize);
+        const seg = buffer.slice(startIdx);
+        const fused = seg.map(p => (p.y + p.z) / 2);
+        const tv = fused.reduce((sum, val, i, arr) => i > 0 ? sum + Math.abs(val - arr[i - 1]) : sum, 0);
+        const jitterScore = tv / (1 + tv);
+        let quality = "✅ Good";
+        if (jitterScore > 0.35) quality = "⚠️ Wobbly";
+        if (jitterScore > 0.6) quality = "❌ Very Wobbly";
 
-        if (now - lastPeakTime >= cooldown) {
-          repTimes.push(now);
-          lastPeakTime = now;
-          repCount++;
-          countDisplay.textContent = repCount;
-          chimeSound.currentTime = 0;
-          chimeSound.play();
-        }
+        // Update status and log
+        const jitterMsg = `#${repCount} @ ${t.toFixed(2)}s — Jitter: ${jitterScore.toFixed(3)} (${quality})`;
+        statusDisplay.textContent = jitterMsg;
+        const logItem = document.createElement("div");
+        logItem.textContent = jitterMsg;
+        repLog.appendChild(logItem);
+
+        // Play sound
+        chimeSound.currentTime = 0;
+        chimeSound.play().catch(() => {});
       }
+    }
 
-      gyroReadout.textContent = `Gyro Z: ${gz.toFixed(2)}`;
+    function pearson(x, y) {
+      const n = x.length;
+      const meanX = x.reduce((a, b) => a + b, 0) / n;
+      const meanY = y.reduce((a, b) => a + b, 0) / n;
+      let num = 0, dx2 = 0, dy2 = 0;
+      for (let i = 0; i < n; i++) {
+        const dx = x[i] - meanX;
+        const dy = y[i] - meanY;
+        num += dx * dy;
+        dx2 += dx * dx;
+        dy2 += dy * dy;
+      }
+      const denom = Math.sqrt(dx2 * dy2);
+      return denom === 0 ? 0 : num / denom;
     }
 
     function padArray(arr, size, padValue = 'replicate') {
@@ -218,30 +240,6 @@
       }
 
       return output;
-    }
-
-    function pearson(x, y) {
-      const n = x.length;
-      const meanX = mean(x), meanY = mean(y);
-      let num = 0, dx2 = 0, dy2 = 0;
-      for (let i = 0; i < n; i++) {
-        const dx = x[i] - meanX;
-        const dy = y[i] - meanY;
-        num += dx * dy;
-        dx2 += dx * dx;
-        dy2 += dy * dy;
-      }
-      const denom = Math.sqrt(dx2 * dy2);
-      return denom === 0 ? 0 : num / denom;
-    }
-
-    function mean(arr) {
-      return arr.reduce((a, b) => a + b, 0) / arr.length;
-    }
-
-    function std(arr) {
-      const m = mean(arr);
-      return Math.sqrt(arr.reduce((sum, val) => sum + (val - m) ** 2, 0) / arr.length);
     }
   </script>
 </body>
