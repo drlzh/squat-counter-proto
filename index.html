@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Adaptive Squat Counter J</title>
+  <title>Adaptive Squat Counter J2</title>
   <style>
     body { font-family: sans-serif; text-align: center; padding: 2rem; }
     h1 { font-size: 2.5rem; margin-bottom: 1rem; }
@@ -17,7 +17,7 @@
   </style>
 </head>
 <body>
-  <h1>Adaptive Squat Counter J</h1>
+  <h1>Adaptive Squat Counter J2</h1>
   <div id="count">0</div>
   <div id="status">Waiting for motion permission...</div>
   <div id="repLog"></div>
@@ -133,25 +133,23 @@
         if (intervalBuffer.length > 10) intervalBuffer.shift();
         lastRepTime = t;
 
-        // Jitter analysis (total variation)
+        // Jitter analysis (on raw signal)
         const windowSize = Math.floor(TARGET_HZ);
         const startIdx = Math.max(0, buffer.length - windowSize);
         const seg = buffer.slice(startIdx);
-        const fused = seg.map(p => (p.y + p.z) / 2);
-        const tv = fused.reduce((sum, val, i, arr) => i > 0 ? sum + Math.abs(val - arr[i - 1]) : sum, 0);
+        const rawFused = seg.map(p => (p.y + p.z) / 2);
+        const tv = rawFused.reduce((sum, val, i, arr) => i > 0 ? sum + Math.abs(val - arr[i - 1]) : sum, 0);
         const jitterScore = tv / (1 + tv);
         let quality = "✅ Good";
         if (jitterScore > 0.35) quality = "⚠️ Wobbly";
         if (jitterScore > 0.6) quality = "❌ Very Wobbly";
 
-        // Update status and log
-        const jitterMsg = `#${repCount} @ ${t.toFixed(2)}s — Jitter: ${jitterScore.toFixed(3)}`;
+        const jitterMsg = `#${repCount} @ ${t.toFixed(2)}s — Jitter: ${jitterScore.toFixed(3)} (${quality})`;
         statusDisplay.textContent = jitterMsg;
         const logItem = document.createElement("div");
         logItem.textContent = jitterMsg;
         repLog.appendChild(logItem);
 
-        // Play sound
         chimeSound.currentTime = 0;
         chimeSound.play().catch(() => {});
       }
