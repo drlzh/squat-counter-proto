@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Squat Counter with Audio</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Squat Counter</title>
   <style>
     body { font-family: sans-serif; text-align: center; padding: 2rem; }
     h1 { font-size: 2.5rem; margin-bottom: 1rem; }
@@ -18,12 +18,11 @@
   <div id="status">Waiting for motion permission...</div>
   <button id="startButton">Start</button>
 
-  <!-- 🔊 Chime Audio -->
+  <!-- 🔊 Chime audio (must be small and in same folder) -->
   <audio id="chime" src="chime.mp3" preload="auto"></audio>
 
   <script>
     const TARGET_HZ = 50;
-    const SAMPLE_SIZE = 31;
     const CORRELATION_THRESHOLD = 0.85;
     const MIN_PEAK_GAP = 1.0;
     const WINDOW_SIZE = 5;
@@ -39,12 +38,21 @@
 
     startButton.onclick = async () => {
       startButton.disabled = true;
-      statusDisplay.textContent = "Requesting permission...";
+      statusDisplay.textContent = "Requesting motion access...";
 
       try {
-        if (typeof DeviceMotionEvent.requestPermission === "function") {
+        if (typeof DeviceMotionEvent?.requestPermission === "function") {
           const response = await DeviceMotionEvent.requestPermission();
           if (response !== "granted") throw new Error("Permission denied");
+        }
+
+        // ✅ Prime audio so Safari won't block it later
+        try {
+          await chime.play();
+          chime.pause();
+          chime.currentTime = 0;
+        } catch (_) {
+          console.warn("Audio priming skipped or blocked");
         }
 
         window.addEventListener("devicemotion", handleMotion);
@@ -83,11 +91,23 @@
           countDisplay.textContent = repCount.toString();
           statusDisplay.textContent = `✅ Rep @ ${t.toFixed(2)}s`;
 
-          // 🔊 Play chime
-          chime.currentTime = 0;
-          chime.play().catch(console.warn); // handle async error silently
+          // ✅ Safe deferred chime playback
+          playChimeSafe();
         }
       }
+    }
+
+    function playChimeSafe() {
+      requestAnimationFrame(() => {
+        try {
+          chime.currentTime = 0;
+          chime.play().catch(err => {
+            console.warn("Audio play blocked:", err);
+          });
+        } catch (err) {
+          console.warn("Audio error:", err);
+        }
+      });
     }
 
     function pearson(x, y) {
@@ -108,7 +128,7 @@
 
     function savitzkyGolay(data) {
       if (data.length < WINDOW_SIZE) return data;
-      const C = [-3, 12, 17, 12, -3];
+      const C = [-3, 12, 17, 12, -3]; // windowSize = 5, poly = 2, deriv = 0
       const norm = 35;
       const result = [];
 
