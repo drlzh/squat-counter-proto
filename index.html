@@ -131,16 +131,17 @@
     };
 
     async function predictPercentile(descentSpeed, sharpness) {
-      if (!onnxSession) return null;
-      const inputTensor = new ort.Tensor('float32', new Float32Array([descentSpeed, sharpness]), [1, 2]);
-      try {
-        const result = await onnxSession.run({ float_input: inputTensor });
-        return result[Object.keys(result)[0]].data[0];
-      } catch (err) {
-        console.error("ONNX inference error:", err);
-        return null;
-      }
-    }
+  if (!onnxSession) return null;
+  try {
+    const inputTensor = new ort.Tensor('float32', new Float32Array([descentSpeed, sharpness]), [1, 2]);
+    const results = await onnxSession.run({ input: inputTensor });
+    return results[Object.keys(results)[0]].data[0];
+  } catch (err) {
+    console.error("❌ ONNX inference error:", err.message);
+    return null;
+  }
+}
+
 
     function handleMotion(event) {
       const acc = event.accelerationIncludingGravity;
