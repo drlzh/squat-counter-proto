@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Adaptive Squat Counter DS1</title>
+  <style>
+    :root {
+      --primary-color: #007aff;
+      --background-color: #f9f9f9;
+      --card-bg: #ffffff;
+      --border-color: #e0e0e0;
+      --text-color: #1c1c1e;
+      --muted-text: #6e6e73;
+      --rounded: 12px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--background-color);
+      color: var(--text-color);
+      margin: 0;
+      padding: 2rem 1rem;
+    }
+
+    h1 {
+      font-size: 2.5rem;
+      margin-bottom: 2rem;
+      text-align: center;
+      color: var(--primary-color);
+    }
+
+    .container {
+      max-width: 800px;
+      margin: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 2rem;
+    }
+
+    .card {
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: var(--rounded);
+      padding: 1.5rem;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    }
+
+    .section-title {
+      font-size: 1.25rem;
+      font-weight: 600;
+      margin-bottom: 1rem;
+      color: var(--text-color);
+    }
+
+    #count {
+      font-size: 5rem;
+      font-weight: bold;
+      text-align: center;
+      color: seagreen;
+    }
+
+    #status {
+      font-size: 1rem;
+      white-space: pre-line;
+      color: var(--text-color);
+      text-align: center;
+    }
+
+    .button-group {
+      display: flex;
+      justify-content: center;
+      gap: 1rem;
+      flex-wrap: wrap;
+      margin-top: 1rem;
+    }
+
+    button {
+      background-color: var(--primary-color);
+      color: white;
+      font-size: 1rem;
+      padding: 0.75rem 1.5rem;
+      border: none;
+      border-radius: var(--rounded);
+      cursor: pointer;
+      transition: background 0.2s ease;
+    }
+
+    button:hover {
+      background-color: #005ecb;
+    }
+
+    input[type="number"], input[type="text"] {
+      font-size: 1rem;
+      padding: 0.5rem;
+      border: 1px solid var(--border-color);
+      border-radius: var(--rounded);
+      width: 100px;
+    }
+
+    label {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 0.95rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .config-group {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 1rem;
+      margin-top: 1rem;
+    }
+
+    #repLog {
+      max-height: 250px;
+      overflow-y: auto;
+      white-space: pre-line;
+    }
+
+    .log-entry {
+      padding: 0.75rem;
+      border-bottom: 1px solid var(--border-color);
+      font-size: 0.95rem;
+    }
+
+    .log-percentile {
+      margin-top: 0.25rem;
+      font-weight: bold;
+      color: var(--primary-color);
+    }
+
+    .checkbox-label {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 1rem;
+    }
+
+    #modelStatus {
+      font-size: 0.85rem;
+      color: var(--muted-text);
+      margin-top: 0.5rem;
+    }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.js"></script>
+</head>
+<body>
+  <h1>Adaptive Squat Counter</h1>
+  <div class="container">
+
+    <!-- Latest Report -->
+    <div class="card">
+      <div class="section-title">Live Performance</div>
+      <div id="count">0</div>
+      <div id="status">Waiting for motion permission...</div>
+      <div class="button-group">
+        <button id="startButton">Start</button>
+        <button id="testSoundButton">Test Sound</button>
+      </div>
+    </div>
+
+    <!-- Squat History -->
+    <div class="card">
+      <div class="section-title">Squat History</div>
+      <div id="repLog"></div>
+    </div>
+
+    <!-- Model Settings -->
+    <div class="card">
+      <div class="section-title">Fitness Estimation</div>
+      <label class="checkbox-label">
+        <input type="checkbox" id="toggleModel" />
+        Enable Fitness Percentile Estimation
+      </label>
+      <div id="modelStatus">Model not loaded.</div>
+    </div>
+
+    <!-- Hyperparameters -->
+    <div class="card">
+      <div class="section-title">Hyperparameters</div>
+      <div class="config-group">
+        <label>TARGET_HZ: <input type="number" id="inputHz" value="50" /></label>
+        <label>SAMPLE_SIZE: <input type="number" id="inputSampleSize" value="31" /></label>
+        <label>WINDOW_DURATION (s): <input type="number" id="inputWindowDuration" value="2.0" step="0.1" /></label>
+        <label>VALLEY_WINDOW: <input type="number" id="inputValleyWindow" value="5" /></label>
+        <label>VALLEY_POSITIONS: <input type="text" id="inputValleyPositions" value="4" /></label>
+        <label>CORRELATION_THRESHOLD: <input type="number" id="inputThreshold" value="0.85" step="0.01" /></label>
+        <label>AMPLITUDE_THRESHOLD: <input type="number" id="inputAmpThreshold" value="2.3" step="0.1" /></label>
+        <label>ADAPTIVE_K: <input type="number" id="inputAdaptiveK" value="0.85" step="0.01" /></label>
+        <label>MIN_CD (s): <input type="number" id="inputMinCd" value="2.0" step="0.1" /></label>
+        <label>MAX_CD (s): <input type="number" id="inputMaxCd" value="3.0" step="0.1" /></label>
+      </div>
+    </div>
+
+  </div>
+
+  <audio id="chimeSound" src="chime.mp3" preload="auto"></audio>
+
+  <script>
+    let TARGET_HZ, SAMPLE_SIZE, WINDOW_DURATION, WINDOW_SIZE, VALLEY_WINDOW, VALLEY_POSITIONS,
+        CORRELATION_THRESHOLD, AMPLITUDE_THRESHOLD, ADAPTIVE_K, MIN_CD, MAX_CD;
+
+    let buffer = [], intervalBuffer = [];
+    let repCount = 0;
+    let lastRepTime = -Infinity;
+    let onnxSession = null;
+    let fitnessPercentileEnabled = false;
+
+    const countDisplay = document.getElementById("count");
+    const statusDisplay = document.getElementById("status");
+    const repLog = document.getElementById("repLog");
+    const startButton = document.getElementById("startButton");
+    const testSoundButton = document.getElementById("testSoundButton");
+    const chimeSound = document.getElementById("chimeSound");
+    const toggleModel = document.getElementById("toggleModel");
+    const modelStatus = document.getElementById("modelStatus");
+
+    toggleModel.onchange = async () => {
+      fitnessPercentileEnabled = toggleModel.checked;
+      if (fitnessPercentileEnabled && !onnxSession) {
+        modelStatus.textContent = "⏳ Loading model...";
+        try {
+          onnxSession = await ort.InferenceSession.create("fitness_percentile_model.onnx");
+          modelStatus.textContent = "✅ Model loaded.";
+        } catch (err) {
+          modelStatus.textContent = "❌ Model load failed.";
+          console.error("ONNX load error:", err);
+        }
+      } else if (!fitnessPercentileEnabled) {
+        modelStatus.textContent = "Model disabled.";
+      }
+    };
+
+    startButton.onclick = async () => {
+      TARGET_HZ = parseInt(document.getElementById("inputHz").value);
+      SAMPLE_SIZE = parseInt(document.getElementById("inputSampleSize").value);
+      WINDOW_DURATION = parseFloat(document.getElementById("inputWindowDuration").value);
+      WINDOW_SIZE = Math.floor(WINDOW_DURATION * TARGET_HZ);
+      VALLEY_WINDOW = parseInt(document.getElementById("inputValleyWindow").value);
+      VALLEY_POSITIONS = document.getElementById("inputValleyPositions").value.split(',').map(p => parseInt(p.trim()));
+      CORRELATION_THRESHOLD = parseFloat(document.getElementById("inputThreshold").value);
+      AMPLITUDE_THRESHOLD = parseFloat(document.getElementById("inputAmpThreshold").value);
+      ADAPTIVE_K = parseFloat(document.getElementById("inputAdaptiveK").value);
+      MIN_CD = parseFloat(document.getElementById("inputMinCd").value);
+      MAX_CD = parseFloat(document.getElementById("inputMaxCd").value);
+
+      startButton.disabled = true;
+      buffer = [];
+      intervalBuffer = [];
+      repCount = 0;
+      lastRepTime = -Infinity;
+      countDisplay.textContent = "0";
+      statusDisplay.textContent = "Tracking motion... Start squatting!";
+
+      try {
+        if (typeof DeviceMotionEvent.requestPermission === "function") {
+          const response = await DeviceMotionEvent.requestPermission();
+          if (response !== "granted") throw new Error("Permission denied");
+        }
+        window.addEventListener("devicemotion", handleMotion);
+      } catch (err) {
+        statusDisplay.textContent = "❌ Motion access denied.";
+        console.error(err);
+      }
+    };
+
+    testSoundButton.onclick = () => {
+      chimeSound.currentTime = 0;
+      chimeSound.play().catch(err => {
+        alert("Audio could not play. Try interacting with the page first.");
+      });
+    };
+
+    async function predictPercentile(descentSpeed, sharpness) {
+      if (!onnxSession) return null;
+      try {
+        const inputTensor = new ort.Tensor('float32', new Float32Array([descentSpeed, sharpness]), [1, 2]);
+        const results = await onnxSession.run({ input: inputTensor });
+        return results[Object.keys(results)[0]].data[0];
+      } catch (err) {
+        console.error("❌ ONNX inference error:", err.message);
+        return null;
+      }
+    }
+
+    /* ---------- GLOBAL PRE‑PROCESSORS ---------- */
+let gravity = { x: 0, y: 0, z: 0 };
+let ema = { x: 0, y: 0, z: 0 };
+let hp = { y: 0, prev: 0 };
+let lp = { y: 0, prev: 0 };
+const EMA_ALPHA = 0.25;
+const HP_CUTOFF = 0.3;
+const LP_CUTOFF = 2.0;
+const dt = 1 / TARGET_HZ;
+const hpAlpha = HP_CUTOFF / (HP_CUTOFF + (1 / (2 * Math.PI * dt)));
+const lpAlpha = (1 / (2 * Math.PI * dt)) / (LP_CUTOFF + (1 / (2 * Math.PI * dt)));
+let phase = "standing";
+
+/* ---------- Helper Functions ---------- */
+function updateGravity(acc) {
+  const α = 0.98;
+  gravity.x = α * gravity.x + (1 - α) * acc.x;
+  gravity.y = α * gravity.y + (1 - α) * acc.y;
+  gravity.z = α * gravity.z + (1 - α) * acc.z;
+}
+function lowPass(acc) {
+  ema.x = EMA_ALPHA * acc.x + (1 - EMA_ALPHA) * ema.x;
+  ema.y = EMA_ALPHA * acc.y + (1 - EMA_ALPHA) * ema.y;
+  ema.z = EMA_ALPHA * acc.z + (1 - EMA_ALPHA) * ema.z;
+  return { x: ema.x, y: ema.y, z: ema.z };
+}
+function bandPass(v) {
+  // high‑pass stage
+  hp.y = hpAlpha * (hp.y + v - hp.prev);
+  hp.prev = v;
+  // low‑pass stage
+  lp.y = lpAlpha * hp.y + (1 - lpAlpha) * (lp.prev || hp.y);
+  lp.prev = lp.y;
+  return lp.y;
+}
+function sgFilter(data, win = 9, poly = 3) {
+  return savitzkyGolay(data, 1, { windowSize: win, polynomial: poly, derivative: 0, pad: 'none' });
+}
+function updatePhase(sig, t) {
+  // central diff for velocity (approx)
+  const n = sig.length;
+  if (n < 3) return phase;
+  const vel = (sig[n - 1] - sig[n - 3]) / (2 / TARGET_HZ);
+  if (phase === "standing" && vel < -0.2) phase = "descending";
+  else if (phase === "descending" && Math.abs(sig[n - 1] - Math.min(...sig.slice(-VALLEY_WINDOW))) < 0.05) phase = "bottom";
+  else if (phase === "bottom" && vel > 0.2) phase = "ascending";
+  else if (phase === "ascending" && vel > -0.1) {
+    phase = "standing";
+    return "completed";
+  }
+  return phase;
+}
+
+/* ---------- MAIN MOTION HANDLER ---------- */
+function handleMotion(event) {
+  const acc = event.accelerationIncludingGravity;
+  const now = Date.now() / 1000;
+  if (!acc?.x || !acc?.y || !acc?.z) return;
+
+  // 1️⃣ Gravity removal (slow low‑pass)
+  updateGravity(acc);
+  const gx = acc.x - gravity.x;
+  const gy = acc.y - gravity.y;
+  const gz = acc.z - gravity.z;
+
+  // 2️⃣ EMA smoothing
+  const smoothed = lowPass({ x: gx, y: gy, z: gz });
+
+  // 3️⃣ Store for later
+  buffer.push({ x: smoothed.x, y: -smoothed.y, z: smoothed.z, t: now });
+  if (buffer.length > 2 * TARGET_HZ) buffer.shift();
+
+  if (buffer.length < SAMPLE_SIZE) return;
+
+  // ------------------------------------------------------------------
+  // FEATURE EXTRACTION (now using the cleaned signal)
+  const yRaw = buffer.map(p => p.y);
+  const zRaw = buffer.map(p => p.z);
+  const yFilt = sgFilter(yRaw);
+  const zFilt = sgFilter(zRaw);
+  const fusedRaw = yFilt.map((v, i) => (v + zFilt[i]) / 2);
+
+  // Band‑pass (optional but strongly recommended)
+  const fused = fusedRaw.map(bandPass);
+
+  // ------------------------------------------------------------------
+  // Correlation / Amplitude check (now using variance‑scaled threshold)
+  const r = pearson(yFilt, zFilt);
+  if (r < CORRELATION_THRESHOLD) return; // still useful as sanity check
+
+  const lastWindow = fused.slice(-VALLEY_WINDOW);
+  const valleyIdx = VALLEY_POSITIONS[0];
+  const isValley = VALLEY_POSITIONS.every(i => lastWindow[i] === Math.min(...lastWindow));
+  if (!isValley) return;
+
+  const amp = Math.abs(lastWindow[valleyIdx] - Math.max(...lastWindow));
+  // Adaptive amplitude threshold based on recent signal noise
+  const noiseStd = Math.sqrt(lastWindow.reduce((s, v) => s + (v - fused.reduce((a, b) => a + b, 0) / fused.length) ** 2, 0) / lastWindow.length);
+  const adaptiveAmpThr = Math.max(AMPLITUDE_THRESHOLD, noiseStd * 4); // 4σ rule
+  if (amp < adaptiveAmpThr) return;
+
+  // ------------------------------------------------------------------
+  // FSM / Velocity validation
+  const fsmResult = updatePhase(fused, now);
+  if (fsmResult !== "completed") return; // not a full down‑up cycle yet
+
+  // ------------------------------------------------------------------
+  // At this point we have a *real* squat – count it
+  repCount++;
+  countDisplay.textContent = repCount.toString();
+
+  // Update cooldown, interval buffer, etc.
+  const t = now;
+  const timeSinceLast = t - lastRepTime;
+  const avgInterval = intervalBuffer.length >= 2
+    ? intervalBuffer.reduce((a, b) => a + b, 0) / intervalBuffer.length
+    : MIN_CD;
+  const cooldown = Math.max(MIN_CD, Math.min(MAX_CD, ADAPTIVE_K * avgInterval));
+  if (timeSinceLast < cooldown) {
+    // Should *rarely* happen because FSM already ensured a proper cadence,
+    // but keep the original guard just in case.
+    repCount--;
+    countDisplay.textContent = repCount.toString();
+    return;
+  }
+
+  // Store interval and timestamps
+  intervalBuffer.push(timeSinceLast);
+  if (intervalBuffer.length > 10) intervalBuffer.shift();
+  lastRepTime = t;
+
+  // ------------------------------------------------------------------
+  // Metrics: displacement, descent speed, sharpness (unchanged from original)
+  // (You can keep the original block that computes mag, vel, disp, ...)
+
+  // (Copy-paste the original metric computation here – unchanged)
+  const windowSize = Math.floor(TARGET_HZ);
+  const seg = buffer.slice(Math.max(0, buffer.length - windowSize));
+  const mag = seg.map(p => Math.sqrt(p.x ** 2 + p.y ** 2 + p.z ** 2));
+  const time = seg.map(p => p.t);
+  const vel = [0];
+  for (let i = 1; i < mag.length; i++) {
+    const dt = time[i] - time[i - 1];
+    vel.push(vel[i - 1] + 0.5 * (mag[i] + mag[i - 1]) * dt);
+  }
+  const disp = [0];
+  for (let i = 1; i < vel.length; i++) {
+    const dt = time[i] - time[i - 1];
+    disp.push(disp[i - 1] + 0.5 * (vel[i] + vel[i - 1]) * dt);
+  }
+  const displacement = disp[disp.length - 1] - disp[0];
+  const descentDuration = time[time.length - 1] - time[0];
+  const descentSpeed = displacement / descentDuration;
+  let speedQuality = "✅ Good";
+  if (descentSpeed < 0.3) speedQuality = "⚠️ Slow";
+  if (descentSpeed < 0.15) speedQuality = "❌ Ineffective";
+
+  const rawFused = seg.map(p => (p.y + p.z) / 2);
+  function computeSharpness(sig, thresholdRatio = 0.5) {
+    const min = Math.min(...sig);
+    const max = Math.max(...sig);
+    const depth = max - min;
+    const valleyIndex = sig.indexOf(min);
+    let left = valleyIndex, right = valleyIndex;
+    while (left > 0 && sig[left] < min + thresholdRatio * depth) left--;
+    while (right < sig.length - 1 && sig[right] < min + thresholdRatio * depth) right++;
+    const width = right - left + 1;
+    return depth / width;
+  }
+  const sharpness = computeSharpness(rawFused);
+  let sharpQuality = "✅ Good";
+  if (sharpness < 0.3) sharpQuality = "⚠️ Flat or Slow";
+  if (sharpness < 0.15) sharpQuality = "❌ No Clear Dip";
+
+  const logText =
+    `#${repCount} @ ${t.toFixed(2)}s\n` +
+    `↳ Descent Speed: ${descentSpeed.toFixed(3)} (${speedQuality})\n` +
+    `↳ Sharpness: ${sharpness.toFixed(3)} (${sharpQuality})`;
+
+  statusDisplay.textContent = logText;
+
+  const logEntry = document.createElement("div");
+  logEntry.className = "log-entry";
+  logEntry.textContent = logText;
+  repLog.appendChild(logEntry);
+
+  // Percentile estimation (unchanged)
+  if (fitnessPercentileEnabled && onnxSession) {
+    predictPercentile(descentSpeed, sharpness).then(percentile => {
+      if (percentile !== null) {
+        const pLine = document.createElement("div");
+        pLine.className = "log-percentile";
+        pLine.textContent = `↳ Estimated Fitness Percentile: ${percentile.toFixed(2)}%`;
+        logEntry.appendChild(pLine);
+      }
+    });
+  }
+
+  // Sound
+  chimeSound.currentTime = 0;
+  chimeSound.play().catch(() => {});
+}
+
+    function pearson(x, y) {
+      const n = x.length;
+      const meanX = x.reduce((a, b) => a + b, 0) / n;
+      const meanY = y.reduce((a, b) => a + b, 0) / n;
+      let num = 0, dx2 = 0, dy2 = 0;
+      for (let i = 0; i < n; i++) {
+        const dx = x[i] - meanX;
+        const dy = y[i] - meanY;
+        num += dx * dy;
+        dx2 += dx * dx;
+        dy2 += dy * dy;
+      }
+      const denom = Math.sqrt(dx2 * dy2);
+      return denom === 0 ? 0 : num / denom;
+    }
+
+    function padArray(arr, size, padValue = 'replicate') {
+      const pre = [], post = [];
+      for (let i = 0; i < size; i++) {
+        pre.push(padValue === 'replicate' ? arr[0] : 0);
+        post.push(padValue === 'replicate' ? arr[arr.length - 1] : 0);
+      }
+      return [...pre, ...arr, ...post];
+    }
+
+    function savitzkyGolay(data, h = 1, options = {}) {
+      const { windowSize = 5, derivative = 0, polynomial = 2, pad = 'none', padValue = 'replicate' } = options;
+      if (windowSize % 2 === 0 || windowSize < 5) throw new RangeError('Window size must be odd and >= 5');
+      const step = Math.floor(windowSize / 2);
+      if (pad === 'pre') data = padArray(data, step, padValue);
+      let C, norm;
+      if (windowSize === 5 && polynomial === 2 && [0, 1, 2].includes(derivative)) {
+        if (derivative === 0) [C, norm] = [[-3, 12, 17, 12, -3], 35];
+        if (derivative === 1) [C, norm] = [[-2, -1, 0, 1, 2], 10];
+        if (derivative === 2) [C, norm] = [[2, -1, -2, -1, 2], 7];
+      } else throw new Error("Only common SG cases supported");
+      const det = norm * Math.pow(h, derivative);
+      const output = [];
+      for (let k = 0; k <= data.length - windowSize; k++) {
+        let acc = 0;
+        for (let l = 0; l < windowSize; l++) acc += (C[l] * data[k + l]) / det;
+        output.push(acc);
+      }
+      return pad === 'post' ? padArray(output, step, padValue) : output;
+    }
+  </script>
+</body>
+</html>
